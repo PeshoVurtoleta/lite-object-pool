@@ -2,6 +2,8 @@
 
 [![npm version](https://img.shields.io/npm/v/lite-object-pool.svg?style=for-the-badge&color=latest)](https://www.npmjs.com/package/lite-object-pool)
 [![npm bundle size](https://img.shields.io/bundlephobia/minzip/lite-object-pool?style=for-the-badge)](https://bundlephobia.com/result?p=lite-object-pool)
+[![npm downloads](https://img.shields.io/npm/dm/lite-object-pool?style=for-the-badge&color=blue)](https://www.npmjs.com/package/lite-object-pool)
+[![npm total downloads](https://img.shields.io/npm/dt/lite-object-pool?style=for-the-badge&color=blue)](https://www.npmjs.com/package/lite-object-pool)
 ![TypeScript](https://img.shields.io/badge/TypeScript-Types-informational)
 ![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
