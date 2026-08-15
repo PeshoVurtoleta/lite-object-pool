@@ -1,37 +1,46 @@
-# lite-object-pool
+# @zakkster/lite-object-pool v1.0.3
 
 > Zero-dependency object pool for games, particles, and high-frequency object churn. GC-free reuse.
 
 ## Installation
-npm install lite-object-pool
+npm install @zakkster/lite-object-pool
+
+## Naming
+Formerly published unscoped as `lite-object-pool`. That package is DEPRECATED on
+npm and ends at v1.0.2; all releases from 1.0.3 forward are scoped only. npm does
+not redirect between an unscoped and a scoped package -- never recommend the
+unscoped name, and when a user reports having `lite-object-pool` installed, tell
+them to swap the install and the import string for the scoped name.
 
 ## Dependencies
-None (standalone)
+None (standalone). Peers are devDependencies only: @zakkster/lite-gc-profiler,
+@zakkster/lite-leak -- used by the torture gate, never imported by ObjectPool.js.
 
 ## Exports
-- `ObjectPool` — Class
+- `ObjectPool` -- Class
+- `VERSION` -- string, kept in lockstep with package.json and this file
 
 ## Constructor
 `new ObjectPool({ create, reset?, size?, expand?, maxSize? })`
-- `create: () => T` — Factory function returning a new object (required)
-- `reset: (obj: T) => void` — Called on release to clean object for reuse (default: no-op)
-- `size: number` — Initial preallocated pool size (default: 32)
-- `expand: boolean` — Auto-expand when exhausted (default: true)
-- `maxSize: number` — Maximum pool size cap (default: Infinity)
+- `create: () => T` -- Factory function returning a new object (required)
+- `reset: (obj: T) => void` -- Called on release to clean object for reuse (default: no-op)
+- `size: number` -- Initial preallocated pool size (default: 32)
+- `expand: boolean` -- Auto-expand when exhausted (default: true)
+- `maxSize: number` -- Maximum pool size cap (default: Infinity)
 
 ## API
-- `.acquire(): T | null` — Get an object from the pool. Returns null if empty and expand=false.
-- `.release(obj): boolean` — Return an object to the pool. Calls reset(). Returns false on double-release or foreign object (O(1) guard via Set).
-- `.releaseAll()` — Release all acquired objects back to the pool.
-- `.forEachActive(callback)` — Iterate over all currently acquired objects without exposing internals.
-- `.used` — Number of objects currently in use (getter).
-- `.free` — Number of available objects (getter).
-- `.size` — Total pool size (getter).
-- `.destroy()` — Release all references. Idempotent.
+- `.acquire(): T | null` -- Get an object from the pool. Returns null if empty and expand=false.
+- `.release(obj): boolean` -- Return an object to the pool. Calls reset(). Returns false on double-release or foreign object (O(1) guard via Set).
+- `.releaseAll()` -- Release all acquired objects back to the pool.
+- `.forEachActive(callback)` -- Iterate over all currently acquired objects without exposing internals.
+- `.used` -- Number of objects currently in use (getter).
+- `.free` -- Number of available objects (getter).
+- `.size` -- Total pool size (getter).
+- `.destroy()` -- Release all references. Idempotent.
 
 ## Usage Example
 ```javascript
-import { ObjectPool } from 'lite-object-pool';
+import { ObjectPool } from '@zakkster/lite-object-pool';
 
 const bullets = new ObjectPool({
     create: () => ({ x: 0, y: 0, active: false }),

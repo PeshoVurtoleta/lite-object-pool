@@ -1,14 +1,16 @@
 {
-  "name": "lite-object-pool",
+  "name": "@zakkster/lite-object-pool",
   "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Tiny, fast, zero-dependency object pool with O(1) acquire/release, double-release protection, and auto-expansion for games and particle systems.",
   "type": "module",
-  "main": "ObjectPool.js",
-  "types": "ObjectPool.d.ts",
+  "main": "./ObjectPool.js",
+  "module": "./ObjectPool.js",
+  "types": "./ObjectPool.d.ts",
   "exports": {
     ".": {
       "types": "./ObjectPool.d.ts",
+      "node": "./ObjectPool.js",
       "import": "./ObjectPool.js",
       "default": "./ObjectPool.js"
     }
@@ -17,11 +19,15 @@
     "ObjectPool.js",
     "ObjectPool.d.ts",
     "llms.txt",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "node --test test/*.test.js",
+    "torture": "node --expose-gc test/torture.mjs",
+    "torture:controls": "node test/controls.mjs",
+    "verify": "npm test && npm run torture && npm run torture:controls"
   },
   "keywords": [
     "object-pool",
@@ -38,6 +44,9 @@
     "zero-dependency"
   ],
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "homepage": "https://github.com/PeshoVurtoleta/lite-object-pool#readme",
   "repository": {
     "type": "git",
@@ -47,10 +56,16 @@
     "url": "https://github.com/PeshoVurtoleta/lite-object-pool/issues",
     "email": "shinikchiev@yahoo.com"
   },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/PeshoVurtoleta"
+  },
   "devDependencies": {
-    "vitest": "^1.0.0"
+    "@zakkster/lite-gc-profiler": "^1.15.0",
+    "@zakkster/lite-leak": "^1.8.1"
   },
   "engines": {
-    "node": ">=16.0.0"
-  }
+    "node": ">=18"
+  },
+  "sideEffects": false
 }

@@ -1,6 +1,12 @@
 /**
- * lite-object-pool — Zero-dependency Object Pool
+ * @zakkster/lite-object-pool -- Zero-dependency Object Pool
+ *
+ * Formerly published unscoped as `lite-object-pool`, which is deprecated and
+ * ends at v1.0.2. All releases from 1.0.3 forward are scoped.
  */
+
+/** Package version. Kept in sync with package.json and llms.txt. */
+export const VERSION: string;
 
 export interface ObjectPoolOptions<T> {
     /** Factory function that returns a new object. Required. */
@@ -11,7 +17,7 @@ export interface ObjectPoolOptions<T> {
     size?: number;
     /** Auto-expand when exhausted. Default: true */
     expand?: boolean;
-    /** Maximum pool size — prevents runaway expansion. Default: Infinity */
+    /** Ceiling on auto-expansion. Not a cap on `size` in 1.0.3; see README. Default: Infinity */
     maxSize?: number;
 }
 
@@ -59,14 +65,14 @@ export class ObjectPool<T = any> {
 
     /**
      * Execute a callback for every currently acquired (active) object.
-     * Ideal for game loops — update/draw all active objects without
+     * Ideal for game loops -- update/draw all active objects without
      * maintaining a separate array or accessing private fields.
      */
     forEachActive(callback: (obj: T) => void): void;
 
     /**
      * Destroy the pool and release all references.
-     * Idempotent — safe to call multiple times.
+     * Idempotent -- safe to call multiple times.
      */
     destroy(): void;
 }

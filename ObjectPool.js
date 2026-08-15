@@ -1,18 +1,29 @@
 /**
- * lite-object-pool — Zero-dependency Object Pool
+ * @zakkster/lite-object-pool -- Zero-dependency Object Pool
  *
  * A tiny, fast, ES6 object pool for games, particles, scratch effects,
  * and any high-frequency object churn where GC spikes hurt performance.
  *
+ * Formerly published unscoped as `lite-object-pool`. That name is deprecated
+ * and ends at v1.0.2; every release from 1.0.3 forward is scoped.
+ *
  * Features:
  * - Preallocates objects for GC-free reuse
- * - Optional auto-expansion with maxSize safety cap
+ * - Optional auto-expansion with a maxSize ceiling
  * - O(1) acquire, release, and double-release protection
  * - forEachActive() for game loop iteration without exposing internals
  * - User-defined create() and reset() callbacks
  * - Stats: size, used, free
  * - Zero dependencies, < 1 KB
  */
+
+/** Shared no-op used as the default reset so every pool without a reset
+ *  callback references one function instance instead of allocating a fresh
+ *  closure per constructor call. */
+const NOOP = () => {};
+
+/** Package version. Kept in sync with package.json and llms.txt. */
+export const VERSION = '1.0.3';
 
 export class ObjectPool {
     /**
@@ -23,7 +34,7 @@ export class ObjectPool {
      * @param {boolean}  [options.expand] Auto-expand when exhausted. Default: true
      * @param {number}   [options.maxSize] Maximum pool size (prevents runaway expansion). Default: Infinity
      */
-    constructor({ create, reset = () => {}, size = 32, expand = true, maxSize = Infinity }) {
+    constructor({ create, reset = NOOP, size = 32, expand = true, maxSize = Infinity }) {
         if (typeof create !== 'function') {
             throw new TypeError('ObjectPool: "create" callback is required and must be a function');
         }
@@ -35,7 +46,7 @@ export class ObjectPool {
         this._destroyed = false;
         this._totalCreated = size;
 
-        // Free list (stack) — acquire is pop(), release is push(), both O(1)
+        // Free list (stack) -- acquire is pop(), release is push(), both O(1)
         this._free = new Array(size);
         for (let i = 0; i < size; i++) {
             this._free[i] = create();
@@ -43,7 +54,7 @@ export class ObjectPool {
 
         // O(1) double-release and foreign-object guard.
         // Tracks objects currently "checked out" (acquired but not yet released).
-        // Set.has() / .add() / .delete() are all O(1) — no performance penalty.
+        // Set.has() / .add() / .delete() are all O(1) -- no performance penalty.
         this._out = new Set();
     }
 
@@ -107,7 +118,7 @@ export class ObjectPool {
 
     /**
      * Execute a callback for every currently acquired (active) object.
-     * Ideal for game loops — update/draw all active particles without
+     * Ideal for game loops -- update/draw all active particles without
      * maintaining a separate array or accessing private fields.
      *
      * @param {Function} callback Called with each active object
@@ -136,7 +147,7 @@ export class ObjectPool {
 
     /**
      * Destroy the pool and release all references.
-     * Idempotent — safe to call multiple times.
+     * Idempotent -- safe to call multiple times.
      */
     destroy() {
         if (this._destroyed) return;

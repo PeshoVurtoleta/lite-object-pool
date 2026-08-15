@@ -1,7 +1,32 @@
-import { describe, it, expect, vi } from 'vitest';
+import { test, describe } from 'node:test';
+import assert from 'node:assert/strict';
 import { ObjectPool } from '../ObjectPool.js';
 
-/** Helper: create a pool with particle-like objects */
+/**
+ * Hand-rolled call recorder -- replaces vitest's vi.fn().
+ *
+ * `impl` is the optional backing implementation. Every call pushes its
+ * argument list onto `.calls`, so `.calls.length` is the call count and
+ * `.calls[i]` is the argument array of call i. `.reset()` clears the log,
+ * standing in for vi.fn()'s mockClear().
+ */
+function spy(impl) {
+    const fn = (...args) => {
+        fn.calls.push(args);
+        return impl ? impl(...args) : undefined;
+    };
+    fn.calls = [];
+    fn.reset = () => { fn.calls.length = 0; };
+    return fn;
+}
+
+/** True iff `fn` was called at least once with exactly `arg` (strict identity)
+ *  as its sole argument -- the node:assert stand-in for toHaveBeenCalledWith. */
+function calledWith(fn, arg) {
+    return fn.calls.some((a) => a.length === 1 && a[0] === arg);
+}
+
+/** Create a pool with particle-like objects. */
 function createPool(overrides = {}) {
     return new ObjectPool({
         create: () => ({ x: 0, y: 0, vx: 0, vy: 0, life: 0 }),
@@ -12,153 +37,153 @@ function createPool(overrides = {}) {
     });
 }
 
-describe('🎱 ObjectPool', () => {
+describe('ObjectPool', () => {
 
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
     //  Constructor
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
 
     describe('constructor', () => {
-        it('preallocates the specified number of objects', () => {
+        test('preallocates the specified number of objects', () => {
             const pool = createPool({ size: 10 });
-            expect(pool.size).toBe(10);
-            expect(pool.free).toBe(10);
-            expect(pool.used).toBe(0);
+            assert.strictEqual(pool.size, 10);
+            assert.strictEqual(pool.free, 10);
+            assert.strictEqual(pool.used, 0);
         });
 
-        it('defaults to size 32', () => {
+        test('defaults to size 32', () => {
             const pool = new ObjectPool({ create: () => ({}) });
-            expect(pool.size).toBe(32);
+            assert.strictEqual(pool.size, 32);
         });
 
-        it('calls create() for each preallocated object', () => {
-            const create = vi.fn(() => ({}));
+        test('calls create() for each preallocated object', () => {
+            const create = spy(() => ({}));
             new ObjectPool({ create, size: 5 });
-            expect(create).toHaveBeenCalledTimes(5);
+            assert.strictEqual(create.calls.length, 5);
         });
 
-        it('throws if create is not provided', () => {
-            expect(() => new ObjectPool({})).toThrow(/create.*required/i);
+        test('throws if create is not provided', () => {
+            assert.throws(() => new ObjectPool({}), /create.*required/i);
         });
 
-        it('throws if create is not a function', () => {
-            expect(() => new ObjectPool({ create: 'nope' })).toThrow(/function/i);
+        test('throws if create is not a function', () => {
+            assert.throws(() => new ObjectPool({ create: 'nope' }), /function/i);
         });
 
-        it('defaults reset to no-op', () => {
+        test('defaults reset to no-op', () => {
             const pool = new ObjectPool({ create: () => ({ val: 42 }), size: 1 });
             const obj = pool.acquire();
             obj.val = 999;
             pool.release(obj);
             const reused = pool.acquire();
-            expect(reused.val).toBe(999); // no-op reset doesn't clear
+            assert.strictEqual(reused.val, 999); // no-op reset doesn't clear
         });
 
-        it('defaults expand to true', () => {
+        test('defaults expand to true', () => {
             const pool = new ObjectPool({ create: () => ({}), size: 1 });
             pool.acquire();
             const second = pool.acquire(); // pool exhausted, should expand
-            expect(second).not.toBeNull();
+            assert.notStrictEqual(second, null);
         });
     });
 
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
     //  Acquire
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
 
     describe('acquire()', () => {
-        it('returns an object from the pool', () => {
+        test('returns an object from the pool', () => {
             const pool = createPool();
             const obj = pool.acquire();
-            expect(obj).toHaveProperty('x');
-            expect(obj).toHaveProperty('life');
+            assert.ok('x' in obj);
+            assert.ok('life' in obj);
         });
 
-        it('decrements free count', () => {
+        test('decrements free count', () => {
             const pool = createPool({ size: 3 });
-            expect(pool.free).toBe(3);
+            assert.strictEqual(pool.free, 3);
             pool.acquire();
-            expect(pool.free).toBe(2);
+            assert.strictEqual(pool.free, 2);
         });
 
-        it('increments used count', () => {
+        test('increments used count', () => {
             const pool = createPool({ size: 3 });
-            expect(pool.used).toBe(0);
+            assert.strictEqual(pool.used, 0);
             pool.acquire();
-            expect(pool.used).toBe(1);
+            assert.strictEqual(pool.used, 1);
         });
 
-        it('returns unique objects', () => {
+        test('returns unique objects', () => {
             const pool = createPool({ size: 3 });
             const a = pool.acquire();
             const b = pool.acquire();
-            expect(a).not.toBe(b);
+            assert.notStrictEqual(a, b);
         });
 
-        it('expands when exhausted (expand=true)', () => {
+        test('expands when exhausted (expand=true)', () => {
             const pool = createPool({ size: 1, expand: true });
             pool.acquire(); // takes the 1 preallocated
             const extra = pool.acquire(); // should expand
-            expect(extra).not.toBeNull();
-            expect(pool.size).toBe(2);
+            assert.notStrictEqual(extra, null);
+            assert.strictEqual(pool.size, 2);
         });
 
-        it('returns null when exhausted (expand=false)', () => {
+        test('returns null when exhausted (expand=false)', () => {
             const pool = createPool({ size: 1, expand: false });
             pool.acquire();
-            expect(pool.acquire()).toBeNull();
+            assert.strictEqual(pool.acquire(), null);
         });
 
-        it('respects maxSize cap during expansion', () => {
+        test('respects maxSize cap during expansion', () => {
             const pool = createPool({ size: 1, expand: true, maxSize: 3 });
             pool.acquire(); // 1 (preallocated)
             pool.acquire(); // 2 (expanded)
             pool.acquire(); // 3 (expanded, at cap)
-            expect(pool.size).toBe(3);
-            expect(pool.acquire()).toBeNull(); // at maxSize
+            assert.strictEqual(pool.size, 3);
+            assert.strictEqual(pool.acquire(), null); // at maxSize
         });
 
-        it('defaults maxSize to Infinity', () => {
+        test('defaults maxSize to Infinity', () => {
             const pool = createPool({ size: 1, expand: true });
             // Should be able to expand far beyond initial size
             for (let i = 0; i < 100; i++) pool.acquire();
-            expect(pool.size).toBe(100);
+            assert.strictEqual(pool.size, 100);
         });
 
-        it('returns null after destroy', () => {
+        test('returns null after destroy', () => {
             const pool = createPool();
             pool.destroy();
-            expect(pool.acquire()).toBeNull();
+            assert.strictEqual(pool.acquire(), null);
         });
     });
 
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
     //  Release
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
 
     describe('release()', () => {
-        it('returns object to the free list', () => {
+        test('returns object to the free list', () => {
             const pool = createPool({ size: 2 });
             const obj = pool.acquire();
-            expect(pool.free).toBe(1);
+            assert.strictEqual(pool.free, 1);
 
             pool.release(obj);
-            expect(pool.free).toBe(2);
-            expect(pool.used).toBe(0);
+            assert.strictEqual(pool.free, 2);
+            assert.strictEqual(pool.used, 0);
         });
 
-        it('calls reset() on the object', () => {
-            const reset = vi.fn();
+        test('calls reset() on the object', () => {
+            const reset = spy();
             const pool = createPool({ reset });
             const obj = pool.acquire();
             obj.x = 100;
             obj.y = 200;
 
             pool.release(obj);
-            expect(reset).toHaveBeenCalledWith(obj);
+            assert.ok(calledWith(reset, obj));
         });
 
-        it('resets object state for reuse', () => {
+        test('resets object state for reuse', () => {
             const pool = createPool();
             const obj = pool.acquire();
             obj.x = 999;
@@ -166,59 +191,59 @@ describe('🎱 ObjectPool', () => {
             obj.life = 42;
 
             pool.release(obj);
-            expect(obj.x).toBe(0);
-            expect(obj.y).toBe(0);
-            expect(obj.life).toBe(0);
+            assert.strictEqual(obj.x, 0);
+            assert.strictEqual(obj.y, 0);
+            assert.strictEqual(obj.life, 0);
         });
 
-        it('returns true on successful release', () => {
+        test('returns true on successful release', () => {
             const pool = createPool();
             const obj = pool.acquire();
-            expect(pool.release(obj)).toBe(true);
+            assert.strictEqual(pool.release(obj), true);
         });
 
-        it('released object can be re-acquired', () => {
+        test('released object can be re-acquired', () => {
             const pool = createPool({ size: 1 });
             const obj = pool.acquire();
             pool.release(obj);
             const reused = pool.acquire();
-            expect(reused).toBe(obj); // same reference
+            assert.strictEqual(reused, obj); // same reference
         });
     });
 
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
     //  Double-Release Protection
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
 
     describe('double-release protection', () => {
-        it('ignores double-release (returns false)', () => {
+        test('ignores double-release (returns false)', () => {
             const pool = createPool({ size: 2 });
             const obj = pool.acquire();
-            expect(pool.release(obj)).toBe(true);
-            expect(pool.release(obj)).toBe(false); // ignored
+            assert.strictEqual(pool.release(obj), true);
+            assert.strictEqual(pool.release(obj), false); // ignored
         });
 
-        it('does not corrupt free list on double-release', () => {
+        test('does not corrupt free list on double-release', () => {
             const pool = createPool({ size: 2 });
             const obj = pool.acquire();
             pool.release(obj);
             pool.release(obj); // should be ignored
 
-            expect(pool.free).toBe(2); // not 3
+            assert.strictEqual(pool.free, 2); // not 3
         });
 
-        it('does not call reset() on double-release', () => {
-            const reset = vi.fn();
+        test('does not call reset() on double-release', () => {
+            const reset = spy();
             const pool = createPool({ reset });
             const obj = pool.acquire();
             pool.release(obj);
-            reset.mockClear();
+            reset.reset(); // mockClear equivalent
 
             pool.release(obj);
-            expect(reset).not.toHaveBeenCalled();
+            assert.strictEqual(reset.calls.length, 0);
         });
 
-        it('two acquires after double-release return different objects', () => {
+        test('two acquires after double-release return different objects', () => {
             const pool = createPool({ size: 2 });
             const a = pool.acquire();
             pool.release(a);
@@ -226,76 +251,76 @@ describe('🎱 ObjectPool', () => {
 
             const b = pool.acquire();
             const c = pool.acquire();
-            expect(b).not.toBe(c);
+            assert.notStrictEqual(b, c);
         });
     });
 
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
     //  Foreign Object Protection
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
 
     describe('foreign object protection', () => {
-        it('ignores objects not from this pool', () => {
+        test('ignores objects not from this pool', () => {
             const pool = createPool();
             const foreign = { x: 0, y: 0 };
-            expect(pool.release(foreign)).toBe(false);
+            assert.strictEqual(pool.release(foreign), false);
         });
 
-        it('does not add foreign objects to free list', () => {
+        test('does not add foreign objects to free list', () => {
             const pool = createPool({ size: 2 });
             const freeBefore = pool.free;
             pool.release({ rogue: true });
-            expect(pool.free).toBe(freeBefore);
+            assert.strictEqual(pool.free, freeBefore);
         });
     });
 
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
     //  releaseAll()
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
 
     describe('releaseAll()', () => {
-        it('releases all acquired objects', () => {
+        test('releases all acquired objects', () => {
             const pool = createPool({ size: 4 });
             pool.acquire();
             pool.acquire();
             pool.acquire();
-            expect(pool.used).toBe(3);
+            assert.strictEqual(pool.used, 3);
 
             pool.releaseAll();
-            expect(pool.used).toBe(0);
-            expect(pool.free).toBe(4);
+            assert.strictEqual(pool.used, 0);
+            assert.strictEqual(pool.free, 4);
         });
 
-        it('calls reset() on each released object', () => {
-            const reset = vi.fn();
+        test('calls reset() on each released object', () => {
+            const reset = spy();
             const pool = createPool({ reset, size: 3 });
             pool.acquire();
             pool.acquire();
 
             pool.releaseAll();
-            expect(reset).toHaveBeenCalledTimes(2);
+            assert.strictEqual(reset.calls.length, 2);
         });
 
-        it('is safe to call when nothing is acquired', () => {
+        test('is safe to call when nothing is acquired', () => {
             const pool = createPool();
-            expect(() => pool.releaseAll()).not.toThrow();
-            expect(pool.free).toBe(4);
+            assert.doesNotThrow(() => pool.releaseAll());
+            assert.strictEqual(pool.free, 4);
         });
 
-        it('is no-op after destroy', () => {
+        test('is no-op after destroy', () => {
             const pool = createPool();
             pool.acquire();
             pool.destroy();
-            expect(() => pool.releaseAll()).not.toThrow();
+            assert.doesNotThrow(() => pool.releaseAll());
         });
     });
 
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
     //  forEachActive()
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
 
     describe('forEachActive()', () => {
-        it('iterates over all acquired objects', () => {
+        test('iterates over all acquired objects', () => {
             const pool = createPool({ size: 4 });
             const a = pool.acquire();
             const b = pool.acquire();
@@ -305,12 +330,12 @@ describe('🎱 ObjectPool', () => {
             const visited = [];
             pool.forEachActive((obj) => visited.push(obj.x));
 
-            expect(visited).toContain(10);
-            expect(visited).toContain(20);
-            expect(visited.length).toBe(2);
+            assert.ok(visited.includes(10));
+            assert.ok(visited.includes(20));
+            assert.strictEqual(visited.length, 2);
         });
 
-        it('skips released objects', () => {
+        test('skips released objects', () => {
             const pool = createPool({ size: 3 });
             const a = pool.acquire();
             const b = pool.acquire();
@@ -319,27 +344,27 @@ describe('🎱 ObjectPool', () => {
             const visited = [];
             pool.forEachActive((obj) => visited.push(obj));
 
-            expect(visited.length).toBe(1);
-            expect(visited[0]).toBe(b);
+            assert.strictEqual(visited.length, 1);
+            assert.strictEqual(visited[0], b);
         });
 
-        it('does nothing when no objects are acquired', () => {
+        test('does nothing when no objects are acquired', () => {
             const pool = createPool({ size: 3 });
-            const callback = vi.fn();
+            const callback = spy();
             pool.forEachActive(callback);
-            expect(callback).not.toHaveBeenCalled();
+            assert.strictEqual(callback.calls.length, 0);
         });
 
-        it('is no-op after destroy', () => {
+        test('is no-op after destroy', () => {
             const pool = createPool();
             pool.acquire();
             pool.destroy();
-            const callback = vi.fn();
+            const callback = spy();
             pool.forEachActive(callback);
-            expect(callback).not.toHaveBeenCalled();
+            assert.strictEqual(callback.calls.length, 0);
         });
 
-        it('works in a game loop update pattern', () => {
+        test('works in a game loop update pattern', () => {
             const pool = createPool({ size: 10 });
 
             // Spawn 5 particles
@@ -357,94 +382,94 @@ describe('🎱 ObjectPool', () => {
             // Verify all were updated
             const lives = [];
             pool.forEachActive((p) => lives.push(p.life));
-            expect(lives.every(l => Math.abs(l - 0.9) < 0.001)).toBe(true);
+            assert.strictEqual(lives.every((l) => Math.abs(l - 0.9) < 0.001), true);
         });
     });
 
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
     //  Stats
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
 
     describe('stats', () => {
-        it('size reflects total created objects', () => {
+        test('size reflects total created objects', () => {
             const pool = createPool({ size: 4 });
-            expect(pool.size).toBe(4);
+            assert.strictEqual(pool.size, 4);
         });
 
-        it('size grows on expansion', () => {
+        test('size grows on expansion', () => {
             const pool = createPool({ size: 1, expand: true });
             pool.acquire();
             pool.acquire(); // expands
-            expect(pool.size).toBe(2);
+            assert.strictEqual(pool.size, 2);
         });
 
-        it('used + free = size (invariant)', () => {
+        test('used + free = size (invariant)', () => {
             const pool = createPool({ size: 5 });
             pool.acquire();
             pool.acquire();
-            expect(pool.used + pool.free).toBe(pool.size);
+            assert.strictEqual(pool.used + pool.free, pool.size);
         });
 
-        it('stats are correct through full lifecycle', () => {
+        test('stats are correct through full lifecycle', () => {
             const pool = createPool({ size: 3 });
-            expect(pool.size).toBe(3);
-            expect(pool.free).toBe(3);
-            expect(pool.used).toBe(0);
+            assert.strictEqual(pool.size, 3);
+            assert.strictEqual(pool.free, 3);
+            assert.strictEqual(pool.used, 0);
 
             const a = pool.acquire();
             const b = pool.acquire();
-            expect(pool.free).toBe(1);
-            expect(pool.used).toBe(2);
+            assert.strictEqual(pool.free, 1);
+            assert.strictEqual(pool.used, 2);
 
             pool.release(a);
-            expect(pool.free).toBe(2);
-            expect(pool.used).toBe(1);
+            assert.strictEqual(pool.free, 2);
+            assert.strictEqual(pool.used, 1);
 
             pool.release(b);
-            expect(pool.free).toBe(3);
-            expect(pool.used).toBe(0);
+            assert.strictEqual(pool.free, 3);
+            assert.strictEqual(pool.used, 0);
         });
     });
 
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
     //  Destroy
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
 
     describe('destroy()', () => {
-        it('clears the pool', () => {
+        test('clears the pool', () => {
             const pool = createPool();
             pool.acquire();
             pool.destroy();
-            expect(pool.free).toBe(0);
-            expect(pool.used).toBe(0);
+            assert.strictEqual(pool.free, 0);
+            assert.strictEqual(pool.used, 0);
         });
 
-        it('is idempotent', () => {
+        test('is idempotent', () => {
             const pool = createPool();
             pool.destroy();
-            expect(() => pool.destroy()).not.toThrow();
+            assert.doesNotThrow(() => pool.destroy());
         });
 
-        it('acquire returns null after destroy', () => {
+        test('acquire returns null after destroy', () => {
             const pool = createPool();
             pool.destroy();
-            expect(pool.acquire()).toBeNull();
+            assert.strictEqual(pool.acquire(), null);
         });
 
-        it('release returns false after destroy', () => {
+        test('release returns false after destroy', () => {
             const pool = createPool();
             const obj = pool.acquire();
             pool.destroy();
-            expect(pool.release(obj)).toBe(false);
+            assert.strictEqual(pool.release(obj), false);
         });
     });
 
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
     //  Real-World Usage Pattern
-    // ═══════════════════════════════════════════════
+    // ---------------------------------------------------------------
 
     describe('usage: particle burst', () => {
-        it('handles acquire → mutate → release → reacquire cycle', () => {
+        test('handles acquire -> mutate -> release -> reacquire cycle', () => {
             const pool = createPool({ size: 100 });
 
             // Simulate a burst of 50 particles
@@ -456,20 +481,20 @@ describe('🎱 ObjectPool', () => {
                 p.life = 1.0;
                 active.push(p);
             }
-            expect(pool.used).toBe(50);
-            expect(pool.free).toBe(50);
+            assert.strictEqual(pool.used, 50);
+            assert.strictEqual(pool.free, 50);
 
             // Kill all particles
             for (const p of active) {
                 pool.release(p);
             }
-            expect(pool.used).toBe(0);
-            expect(pool.free).toBe(100);
+            assert.strictEqual(pool.used, 0);
+            assert.strictEqual(pool.free, 100);
 
-            // Reacquire — objects are reused (no GC)
+            // Reacquire -- objects are reused (no GC)
             const reused = pool.acquire();
-            expect(reused.x).toBe(0); // reset was called
-            expect(reused.life).toBe(0);
+            assert.strictEqual(reused.x, 0); // reset was called
+            assert.strictEqual(reused.life, 0);
         });
     });
 });
