@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { ObjectPool } from '../ObjectPool.js';
+import { ObjectPool, VERSION } from '../ObjectPool.js';
 
 /**
  * Hand-rolled call recorder -- replaces vitest's vi.fn().
@@ -35,6 +35,14 @@ function createPool(overrides = {}) {
         expand: true,
         ...overrides,
     });
+}
+
+/** Collect the ids of the active objects (unordered), sorted for set-equality. */
+function activeIds(pool) {
+    const ids = [];
+    pool.forEachActive((o) => ids.push(o.id));
+    ids.sort((a, b) => a - b);
+    return ids;
 }
 
 describe('ObjectPool', () => {
@@ -85,12 +93,115 @@ describe('ObjectPool', () => {
             const second = pool.acquire(); // pool exhausted, should expand
             assert.notStrictEqual(second, null);
         });
+
+        test('VERSION is exported and is 2.0.0', () => {
+            assert.strictEqual(VERSION, '2.0.0');
+        });
     });
 
     // ---------------------------------------------------------------
-    //  Option validation (P1, v1.1.0) -- independent unit coverage of the
-    //  torture suite's T1 tier. The torture gate and the unit suite must
-    //  BOTH be able to catch a validation regression on their own.
+    //  create() return-value policy (v2.0.0, D1) -- fail closed
+    // ---------------------------------------------------------------
+
+    describe('create() return-value policy', () => {
+        for (const [label, factory] of [
+            ['null', () => null],
+            ['undefined', () => undefined],
+            ['a number', () => 5],
+            ['a string', () => 'x'],
+            ['a boolean', () => true],
+        ]) {
+            test(`rejects create() returning ${label}`, () => {
+                assert.throws(
+                    () => new ObjectPool({ create: factory, size: 1 }),
+                    (err) => err instanceof TypeError && /ObjectPool: create\(/.test(err.message),
+                );
+            });
+        }
+
+        test('accepts create() returning a function (a valid identity)', () => {
+            const pool = new ObjectPool({ create: () => () => {}, size: 2 });
+            assert.strictEqual(pool.size, 2);
+            assert.strictEqual(typeof pool.acquire(), 'function');
+        });
+
+        test('rejects create() returning a duplicate identity', () => {
+            const same = {};
+            assert.throws(
+                () => new ObjectPool({ create: () => same, size: 2 }),
+                (err) => err instanceof TypeError && /distinct identity/.test(err.message),
+            );
+        });
+
+        test('a single-object pool of one shared identity is legal (one creation)', () => {
+            const same = { tag: 1 };
+            const pool = new ObjectPool({ create: () => same, size: 1 });
+            assert.strictEqual(pool.acquire(), same);
+        });
+
+        test('a bad create() return never leaves a half-built pool -- create ran once', () => {
+            let created = 0;
+            const create = () => { created++; return null; };
+            assert.throws(() => new ObjectPool({ create, size: 8 }), /ObjectPool: create\(/);
+            assert.strictEqual(created, 1); // stops at the first bad object
+        });
+    });
+
+    // ---------------------------------------------------------------
+    //  Unknown option keys (v2.0.0) -- fail closed with did-you-mean
+    // ---------------------------------------------------------------
+
+    describe('unknown option keys', () => {
+        test('an unknown key throws a named TypeError', () => {
+            assert.throws(
+                () => new ObjectPool({ create: () => ({}), typoo: 1 }),
+                (err) => err instanceof TypeError && /^ObjectPool: "typoo" is not a recognized option/.test(err.message),
+            );
+        });
+
+        test('did-you-mean fires for near-miss keys', () => {
+            const cases = [['maxsize', 'maxSize'], ['Size', 'size'], ['expaned', 'expand'], ['rest', 'reset']];
+            for (const [bad, meant] of cases) {
+                let err = null;
+                try { new ObjectPool({ create: () => ({}), [bad]: 1 }); } catch (e) { err = e; }
+                assert.ok(err instanceof TypeError, `${bad} did not throw`);
+                assert.match(err.message, new RegExp(`"${bad}"`), `${bad} not named`);
+                assert.match(err.message, new RegExp(`did you mean "${meant}"`), `${bad} did not suggest ${meant}: ${err.message}`);
+            }
+        });
+
+        test('the three reserved future names throw a 2.1.0-specific message', () => {
+            for (const key of ['capacity', 'prealloc', 'onExhausted']) {
+                let err = null;
+                try { new ObjectPool({ create: () => ({}), [key]: 1 }); } catch (e) { err = e; }
+                assert.ok(err instanceof TypeError, `${key} did not throw`);
+                assert.match(err.message, new RegExp(`^ObjectPool: "${key}"`), `${key} not named`);
+                assert.match(err.message, /2\.1\.0/, `${key} did not mention 2.1.0: ${err.message}`);
+            }
+        });
+
+        test('a full valid options object with all five keys constructs', () => {
+            assert.doesNotThrow(() => new ObjectPool({
+                create: () => ({}), reset: () => {}, size: 4, expand: true, maxSize: 10,
+            }));
+        });
+
+        test('explicit undefined for an optional key is NOT an unknown key', () => {
+            assert.doesNotThrow(() => new ObjectPool({
+                create: () => ({}), reset: undefined, size: undefined, expand: undefined, maxSize: undefined,
+            }));
+        });
+
+        test('a bad size is reported before an unknown key', () => {
+            assert.throws(
+                () => new ObjectPool({ create: () => ({}), size: NaN, typoo: 1 }),
+                (err) => err instanceof TypeError && /^ObjectPool: "size"/.test(err.message),
+            );
+        });
+    });
+
+    // ---------------------------------------------------------------
+    //  Option validation (P1, v1.1.0) -- unchanged in v2.
     // ---------------------------------------------------------------
 
     describe('option validation', () => {
@@ -122,9 +233,9 @@ describe('ObjectPool', () => {
                 assert.strictEqual(pool.free, 0);
                 assert.strictEqual(pool.used, 0);
                 // expand defaults to true, so an empty pool still serves the
-                // first acquire by expanding. null is the expand:false path.
+                // first acquire by growing a bounded chunk.
                 assert.notStrictEqual(pool.acquire(), null);
-                assert.strictEqual(pool.size, 1);
+                assert.ok(pool.size > 0);
             });
 
             test('size: 0 with expand:false is exhausted from the start', () => {
@@ -161,18 +272,10 @@ describe('ObjectPool', () => {
                 );
             });
 
-            // 50 acquires from a size:1 pool consume the one preallocated
-            // object and then expand 49 times -- final size is 50, not 51.
-            test('defaults maxSize to Infinity when omitted', () => {
-                const pool = new ObjectPool({ create: () => ({}), size: 1, expand: true });
-                for (let i = 0; i < 50; i++) assert.notStrictEqual(pool.acquire(), null);
-                assert.strictEqual(pool.size, 50);
-            });
-
             test('accepts an explicit maxSize: Infinity as equivalent to the default', () => {
                 const pool = new ObjectPool({ create: () => ({}), size: 1, expand: true, maxSize: Infinity });
                 for (let i = 0; i < 50; i++) assert.notStrictEqual(pool.acquire(), null);
-                assert.strictEqual(pool.size, 50);
+                assert.ok(pool.size >= 50);
             });
         });
 
@@ -278,8 +381,6 @@ describe('ObjectPool', () => {
             });
 
             test('a bad size is rejected before an otherwise-contradictory maxSize is reported', () => {
-                // Both size and maxSize are bad; size is checked first, so the
-                // thrown message names "size", not "maxSize".
                 assert.throws(
                     () => new ObjectPool({ create: () => ({}), size: NaN, maxSize: -1 }),
                     (err) => err instanceof TypeError && /^ObjectPool: "size"/.test(err.message),
@@ -321,12 +422,20 @@ describe('ObjectPool', () => {
             assert.notStrictEqual(a, b);
         });
 
+        test('every object drained from a full pool is distinct', () => {
+            const N = 32;
+            const pool = createPool({ size: N, expand: false });
+            const seen = new Set();
+            for (let i = 0; i < N; i++) seen.add(pool.acquire());
+            assert.strictEqual(seen.size, N);
+        });
+
         test('expands when exhausted (expand=true)', () => {
             const pool = createPool({ size: 1, expand: true });
-            pool.acquire(); // takes the 1 preallocated
+            pool.acquire();            // takes the 1 preallocated
             const extra = pool.acquire(); // should expand
             assert.notStrictEqual(extra, null);
-            assert.strictEqual(pool.size, 2);
+            assert.ok(pool.size > 1);
         });
 
         test('returns null when exhausted (expand=false)', () => {
@@ -335,26 +444,64 @@ describe('ObjectPool', () => {
             assert.strictEqual(pool.acquire(), null);
         });
 
-        test('respects maxSize cap during expansion', () => {
+        test('respects maxSize cap during expansion (chunk clamps to room)', () => {
             const pool = createPool({ size: 1, expand: true, maxSize: 3 });
-            pool.acquire(); // 1 (preallocated)
-            pool.acquire(); // 2 (expanded)
-            pool.acquire(); // 3 (expanded, at cap)
+            assert.notStrictEqual(pool.acquire(), null); // 1 (preallocated)
+            assert.notStrictEqual(pool.acquire(), null); // grow, room clamps chunk
+            assert.notStrictEqual(pool.acquire(), null);
             assert.strictEqual(pool.size, 3);
-            assert.strictEqual(pool.acquire(), null); // at maxSize
+            assert.strictEqual(pool.acquire(), null);    // at maxSize
         });
 
-        test('defaults maxSize to Infinity', () => {
+        test('a chunked grow never exceeds maxSize', () => {
+            const pool = createPool({ size: 1, expand: true, maxSize: 500 });
+            for (let i = 0; i < 600; i++) pool.acquire();
+            assert.ok(pool.size <= 500);
+            assert.strictEqual(pool.acquire(), null);
+        });
+
+        // GROW_CHUNK is 256 (OP-10). Pin the boundary matrix around it -- one
+        // chunk short, exactly one chunk, one over, two chunks, two chunks plus
+        // one, and unbounded -- so a future change to the chunk size or its
+        // clamp math is caught here instead of only in a throwaway probe.
+        describe('_grow chunk boundaries (GROW_CHUNK = 256)', () => {
+            for (const maxSize of [255, 256, 257, 512, 513]) {
+                test(`maxSize: ${maxSize} drains to exactly maxSize and stays conserved`, () => {
+                    const pool = createPool({ size: 1, expand: true, maxSize });
+                    let n = 0;
+                    while (pool.acquire() !== null) {
+                        n++;
+                        assert.ok(pool.size <= maxSize, `size ${pool.size} exceeded maxSize ${maxSize}`);
+                        assert.strictEqual(pool.used + pool.free, pool.size, 'conservation broken mid-drain');
+                        if (n > maxSize + 1) throw new Error('runaway acquire loop');
+                    }
+                    assert.strictEqual(pool.size, maxSize, 'final chunk did not clamp exactly to maxSize');
+                    assert.strictEqual(pool.used, maxSize);
+                    assert.strictEqual(pool.free, 0);
+                });
+            }
+
+            test('maxSize: Infinity grows past several chunk boundaries with no cap', () => {
+                const pool = createPool({ size: 1, expand: true, maxSize: Infinity });
+                for (let i = 0; i < 600; i++) {
+                    assert.notStrictEqual(pool.acquire(), null);
+                }
+                assert.ok(pool.size >= 600);
+                assert.strictEqual(pool.used + pool.free, pool.size);
+                assert.notStrictEqual(pool.acquire(), null); // still never exhausted
+            });
+        });
+
+        test('keeps serving past the initial size when unbounded', () => {
             const pool = createPool({ size: 1, expand: true });
-            // Should be able to expand far beyond initial size
-            for (let i = 0; i < 100; i++) pool.acquire();
-            assert.strictEqual(pool.size, 100);
+            for (let i = 0; i < 300; i++) assert.notStrictEqual(pool.acquire(), null);
+            assert.ok(pool.size >= 300);
         });
 
-        test('returns null after destroy', () => {
+        test('throws after destroy (use-after-destroy is a caller bug)', () => {
             const pool = createPool();
             pool.destroy();
-            assert.strictEqual(pool.acquire(), null);
+            assert.throws(() => pool.acquire(), /ObjectPool: acquire\(\) called on a destroyed pool/);
         });
     });
 
@@ -410,6 +557,32 @@ describe('ObjectPool', () => {
             const reused = pool.acquire();
             assert.strictEqual(reused, obj); // same reference
         });
+
+        test('swap-remove keeps every remaining object acquirable (any release order)', () => {
+            const N = 8;
+            const pool = createPool({ size: N, expand: false });
+            const held = [];
+            for (let i = 0; i < N; i++) held.push(pool.acquire());
+            // release the middle few in a scattered order
+            pool.release(held[3]);
+            pool.release(held[0]);
+            pool.release(held[6]);
+            assert.strictEqual(pool.used, N - 3);
+            assert.strictEqual(pool.free, 3);
+            // re-acquire 3 -- all distinct, none of the still-held survivors
+            const stillHeld = new Set([held[1], held[2], held[4], held[5], held[7]]);
+            const re = [pool.acquire(), pool.acquire(), pool.acquire()];
+            assert.strictEqual(new Set(re).size, 3);
+            for (const r of re) assert.ok(!stillHeld.has(r));
+            assert.strictEqual(pool.free, 0);
+        });
+
+        test('throws after destroy', () => {
+            const pool = createPool();
+            const obj = pool.acquire();
+            pool.destroy();
+            assert.throws(() => pool.release(obj), /ObjectPool: release\(\) called on a destroyed pool/);
+        });
     });
 
     // ---------------------------------------------------------------
@@ -457,21 +630,99 @@ describe('ObjectPool', () => {
     });
 
     // ---------------------------------------------------------------
-    //  Foreign Object Protection
+    //  Foreign Object Protection (v2.0.0, D4) -- now THROWS
     // ---------------------------------------------------------------
 
     describe('foreign object protection', () => {
-        test('ignores objects not from this pool', () => {
+        test('throws on an object not from this pool', () => {
             const pool = createPool();
             const foreign = { x: 0, y: 0 };
-            assert.strictEqual(pool.release(foreign), false);
+            assert.throws(() => pool.release(foreign),
+                /ObjectPool: release\(\) called with an object this pool did not issue/);
         });
 
-        test('does not add foreign objects to free list', () => {
+        test('throws on an object from a same-shape sibling pool', () => {
+            const pool = createPool({ size: 2 });
+            const sibling = createPool({ size: 2 });
+            const alien = sibling.acquire();
+            assert.throws(() => pool.release(alien), TypeError);
+        });
+
+        for (const [label, value] of [
+            ['null', null], ['undefined', undefined], ['0', 0], ["''", ''], ['NaN', NaN],
+        ]) {
+            test(`throws on release(${label})`, () => {
+                const pool = createPool();
+                assert.throws(() => pool.release(value), TypeError);
+            });
+        }
+
+        test('throws on a frozen foreign object and a Proxy', () => {
+            const pool = createPool();
+            assert.throws(() => pool.release(Object.freeze({})), TypeError);
+            assert.throws(() => pool.release(new Proxy({}, {})), TypeError);
+        });
+
+        test('a rejected foreign release does not touch the free list', () => {
             const pool = createPool({ size: 2 });
             const freeBefore = pool.free;
-            pool.release({ rogue: true });
+            try { pool.release({ rogue: true }); } catch { /* expected */ }
             assert.strictEqual(pool.free, freeBefore);
+        });
+    });
+
+    // ---------------------------------------------------------------
+    //  Non-extensible factories (v2.0.0, D1) -- WeakMap keys need not extend
+    // ---------------------------------------------------------------
+
+    describe('non-extensible factories pool live', () => {
+        test('sealed objects pool and reset', () => {
+            const pool = new ObjectPool({
+                create: () => Object.seal({ x: 0, y: 0 }),
+                reset: (o) => { o.x = 0; o.y = 0; },
+                size: 3,
+            });
+            const o = pool.acquire();
+            o.x = 7;
+            assert.strictEqual(pool.release(o), true);
+            assert.strictEqual(pool.acquire().x, 0); // reset ran
+        });
+
+        test('preventExtensions objects pool', () => {
+            const pool = new ObjectPool({
+                create: () => Object.preventExtensions({ x: 0 }),
+                reset: () => {},
+                size: 2,
+            });
+            assert.strictEqual(pool.release(pool.acquire()), true);
+        });
+
+        test('frozen objects pool with a no-op reset', () => {
+            const pool = new ObjectPool({
+                create: () => Object.freeze({ x: 0 }),
+                reset: () => {},
+                size: 2,
+            });
+            const o = pool.acquire();
+            assert.strictEqual(pool.release(o), true);
+            assert.strictEqual(pool.acquire(), o);
+        });
+
+        test('frozen object with a WRITING reset surfaces the caller error unmodified', () => {
+            const pool = new ObjectPool({
+                create: () => Object.freeze({ x: 0 }),
+                reset: (o) => { o.x = 0; }, // writes to a frozen prop -> native TypeError
+                size: 1,
+            });
+            const o = pool.acquire();
+            // This error comes from the CALLER's own reset (assigning to a frozen
+            // property), surfaced UNMODIFIED. It is deliberately NOT wrapped into
+            // an `ObjectPool:` message: wrapping would hide which line failed. Do
+            // not "fix" this into a library error.
+            assert.throws(() => pool.release(o), (err) =>
+                err instanceof TypeError
+                && /read only property|not extensible|Cannot assign/.test(err.message)
+                && !/^ObjectPool:/.test(err.message));
         });
     });
 
@@ -502,17 +753,27 @@ describe('ObjectPool', () => {
             assert.strictEqual(reset.calls.length, 2);
         });
 
+        test('is idempotent and leaves used === 0', () => {
+            const pool = createPool({ size: 4 });
+            pool.acquire();
+            pool.releaseAll();
+            const freeAfter = pool.free;
+            pool.releaseAll();
+            assert.strictEqual(pool.used, 0);
+            assert.strictEqual(pool.free, freeAfter);
+        });
+
         test('is safe to call when nothing is acquired', () => {
             const pool = createPool();
             assert.doesNotThrow(() => pool.releaseAll());
             assert.strictEqual(pool.free, 4);
         });
 
-        test('is no-op after destroy', () => {
+        test('throws after destroy', () => {
             const pool = createPool();
             pool.acquire();
             pool.destroy();
-            assert.doesNotThrow(() => pool.releaseAll());
+            assert.throws(() => pool.releaseAll(), /ObjectPool: releaseAll\(\) called on a destroyed pool/);
         });
     });
 
@@ -536,6 +797,16 @@ describe('ObjectPool', () => {
             assert.strictEqual(visited.length, 2);
         });
 
+        test('visits exactly `used` objects, each exactly once', () => {
+            const pool = createPool({ size: 6 });
+            for (let i = 0; i < 4; i++) pool.acquire();
+            const seen = new Set();
+            let count = 0;
+            pool.forEachActive((o) => { count++; seen.add(o); });
+            assert.strictEqual(count, 4);
+            assert.strictEqual(seen.size, 4);
+        });
+
         test('skips released objects', () => {
             const pool = createPool({ size: 3 });
             const a = pool.acquire();
@@ -556,34 +827,141 @@ describe('ObjectPool', () => {
             assert.strictEqual(callback.calls.length, 0);
         });
 
-        test('is no-op after destroy', () => {
+        test('releasing the CURRENT object mid-iteration visits all N once (D3)', () => {
+            const N = 10;
+            const pool = createPool({ size: N, expand: false });
+            for (let i = 0; i < N; i++) pool.acquire();
+            const seen = new Set();
+            let count = 0;
+            pool.forEachActive((o) => { count++; seen.add(o); pool.release(o); });
+            assert.strictEqual(count, N, 'every active object was visited once');
+            assert.strictEqual(seen.size, N, 'no object visited twice');
+            assert.strictEqual(pool.used, 0);
+            assert.strictEqual(pool.free, pool.size);
+        });
+
+        // The next two pin the DOCUMENTED-UNSPECIFIED region of D3. Reverse
+        // iteration is contractual ONLY for releasing the CURRENT object; these
+        // record what actually happens when you release some OTHER object
+        // mid-walk. They exist to catch a silent change, NOT to bless the
+        // outcome -- do not "fix" the double-visit; widening the guarantee is out
+        // of P2a scope. The part that IS guaranteed is conservation.
+        test('releasing a NOT-YET-visited object mid-iteration: unspecified visits, conservation holds', () => {
+            const N = 5;
+            let id = 0;
+            const pool = new ObjectPool({ create: () => ({ id: id++ }), size: N, expand: false });
+            const held = [];
+            for (let i = 0; i < N; i++) held.push(pool.acquire()); // ids 0..4
+            const visited = [];
+            pool.forEachActive((o) => {
+                visited.push(o.id);
+                if (visited.length === 1) pool.release(held[0]); // a lower-index, not-yet-reached slot
+            });
+            // ACTUAL v2 behaviour: the tail element swapped into the freed low
+            // slot is seen twice and one object is skipped -- unspecified, pinned.
+            assert.ok(new Set(visited).size < N, 'expected a skipped/double-visited object (documented unspecified)');
+            // GUARANTEED: the structure never corrupts.
+            assert.strictEqual(pool.used + pool.free, pool.size);
+            assert.strictEqual(pool.used, N - 1);
+        });
+
+        test('releasing an ALREADY-visited object mid-iteration: no revisit, conservation holds', () => {
+            const N = 5;
+            let id = 0;
+            const pool = new ObjectPool({ create: () => ({ id: id++ }), size: N, expand: false });
+            const held = [];
+            for (let i = 0; i < N; i++) held.push(pool.acquire());
+            const visited = [];
+            pool.forEachActive((o) => {
+                visited.push(o.id);
+                if (visited.length === 1) pool.release(held[N - 1]); // the highest-index slot, visited first
+            });
+            // ACTUAL v2 behaviour: releasing an already-visited (higher-index)
+            // object leaves the remaining walk clean -- pinned, not guaranteed.
+            assert.strictEqual(new Set(visited).size, N);
+            assert.strictEqual(pool.used + pool.free, pool.size);
+            assert.strictEqual(pool.used, N - 1);
+        });
+
+        test('releaseAll() mid-iteration stops the walk', () => {
+            const pool = createPool({ size: 4, expand: false });
+            for (let i = 0; i < 4; i++) pool.acquire();
+            let count = 0;
+            pool.forEachActive(() => { count++; pool.releaseAll(); });
+            assert.strictEqual(count, 1);
+            assert.strictEqual(pool.used, 0);
+        });
+
+        test('binds thisArg as the callback receiver', () => {
+            const pool = createPool({ size: 3 });
+            pool.acquire();
+            pool.acquire();
+            const receiver = { n: 0 };
+            pool.forEachActive(function () { this.n++; }, receiver);
+            assert.strictEqual(receiver.n, 2);
+        });
+
+        test('propagates a throwing callback', () => {
+            const pool = createPool({ size: 2 });
+            pool.acquire();
+            assert.throws(() => pool.forEachActive(() => { throw new Error('cb boom'); }), /cb boom/);
+        });
+
+        test('throws after destroy', () => {
             const pool = createPool();
             pool.acquire();
             pool.destroy();
-            const callback = spy();
-            pool.forEachActive(callback);
-            assert.strictEqual(callback.calls.length, 0);
+            assert.throws(() => pool.forEachActive(() => {}),
+                /ObjectPool: forEachActive\(\) called on a destroyed pool/);
         });
 
         test('works in a game loop update pattern', () => {
             const pool = createPool({ size: 10 });
-
-            // Spawn 5 particles
             for (let i = 0; i < 5; i++) {
                 const p = pool.acquire();
                 p.x = i * 10;
                 p.life = 1.0;
             }
-
-            // Update loop: age all particles
-            pool.forEachActive((p) => {
-                p.life -= 0.1;
-            });
-
-            // Verify all were updated
+            pool.forEachActive((p) => { p.life -= 0.1; });
             const lives = [];
             pool.forEachActive((p) => lives.push(p.life));
             assert.strictEqual(lives.every((l) => Math.abs(l - 0.9) < 0.001), true);
+        });
+    });
+
+    // ---------------------------------------------------------------
+    //  Iteration order is unspecified (v2.0.0, D2)
+    // ---------------------------------------------------------------
+
+    describe('iteration order is unspecified', () => {
+        test('two pools driven to the same active set are equal as SETS, order not asserted', () => {
+            // Pool A: acquire 0..5, release 1 and 4, re-acquire two.
+            let idA = 0;
+            const a = new ObjectPool({ create: () => ({ id: idA++ }), size: 6, expand: false });
+            const ha = [];
+            for (let i = 0; i < 6; i++) ha.push(a.acquire());
+            a.release(ha[1]);
+            a.release(ha[4]);
+            a.acquire();
+            a.acquire();
+
+            // Pool B: same objects-by-id, driven through DIFFERENT churn.
+            let idB = 0;
+            const b = new ObjectPool({ create: () => ({ id: idB++ }), size: 6, expand: false });
+            const hb = [];
+            for (let i = 0; i < 6; i++) hb.push(b.acquire());
+            b.release(hb[4]);
+            b.release(hb[1]);
+            b.release(hb[0]);
+            b.acquire();
+            b.acquire();
+            b.acquire();
+
+            // Both hold {0,2,3,5} plus the recycled ids -- assert SET equality.
+            assert.deepStrictEqual(activeIds(a), [0, 1, 2, 3, 4, 5]);
+            assert.deepStrictEqual(activeIds(b), [0, 1, 2, 3, 4, 5]);
+            assert.deepStrictEqual(activeIds(a), activeIds(b)); // sets equal
+            // Order is deliberately NOT compared -- that is Decision 2.
         });
     });
 
@@ -601,7 +979,7 @@ describe('ObjectPool', () => {
             const pool = createPool({ size: 1, expand: true });
             pool.acquire();
             pool.acquire(); // expands
-            assert.strictEqual(pool.size, 2);
+            assert.ok(pool.size > 1);
         });
 
         test('used + free = size (invariant)', () => {
@@ -609,6 +987,14 @@ describe('ObjectPool', () => {
             pool.acquire();
             pool.acquire();
             assert.strictEqual(pool.used + pool.free, pool.size);
+        });
+
+        test('conservation holds across a chunked expansion', () => {
+            const pool = createPool({ size: 2, expand: true, maxSize: 1000 });
+            for (let i = 0; i < 400; i++) {
+                pool.acquire();
+                assert.strictEqual(pool.used + pool.free, pool.size);
+            }
         });
 
         test('stats are correct through full lifecycle', () => {
@@ -633,7 +1019,7 @@ describe('ObjectPool', () => {
     });
 
     // ---------------------------------------------------------------
-    //  Destroy
+    //  Destroy (v2.0.0, D4 + OP-09) -- drains, then throws on reuse
     // ---------------------------------------------------------------
 
     describe('destroy()', () => {
@@ -645,23 +1031,264 @@ describe('ObjectPool', () => {
             assert.strictEqual(pool.used, 0);
         });
 
-        test('is idempotent', () => {
+        test('drains -- calls reset() on every object still checked out (OP-09)', () => {
+            const reset = spy();
+            const pool = createPool({ reset, size: 4 });
+            pool.acquire();
+            pool.acquire();
+            pool.acquire();
+            pool.destroy();
+            assert.strictEqual(reset.calls.length, 3);
+        });
+
+        test('does not reset objects that were already released before destroy', () => {
+            const reset = spy();
+            const pool = createPool({ reset, size: 4 });
+            const a = pool.acquire();
+            pool.acquire();
+            pool.release(a);    // one reset here
+            reset.reset();
+            pool.destroy();     // only the one still-checked-out object drains
+            assert.strictEqual(reset.calls.length, 1);
+        });
+
+        test('is idempotent (a second destroy is a safe no-op)', () => {
             const pool = createPool();
             pool.destroy();
             assert.doesNotThrow(() => pool.destroy());
         });
 
-        test('acquire returns null after destroy', () => {
+        test('acquire throws after destroy', () => {
             const pool = createPool();
             pool.destroy();
-            assert.strictEqual(pool.acquire(), null);
+            assert.throws(() => pool.acquire(), /destroyed pool/);
         });
 
-        test('release returns false after destroy', () => {
+        test('release throws after destroy', () => {
             const pool = createPool();
             const obj = pool.acquire();
             pool.destroy();
-            assert.strictEqual(pool.release(obj), false);
+            assert.throws(() => pool.release(obj), /destroyed pool/);
+        });
+    });
+
+    // ---------------------------------------------------------------
+    //  Additional v2 coverage -- release orders, re-entrancy, growth edges
+    // ---------------------------------------------------------------
+
+    describe('release orders round-trip to empty', () => {
+        for (const order of ['lifo', 'fifo', 'random', 'every-other']) {
+            test(`${order} release order leaves used=0, free=size`, () => {
+                const N = 16;
+                const pool = createPool({ size: N, expand: false });
+                const held = [];
+                for (let i = 0; i < N; i++) held.push(pool.acquire());
+                const idx = [];
+                for (let i = 0; i < N; i++) idx.push(i);
+                if (order === 'lifo') idx.reverse();
+                else if (order === 'random') {
+                    let seed = 12345;
+                    for (let i = idx.length - 1; i > 0; i--) {
+                        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+                        const j = seed % (i + 1);
+                        const t = idx[i]; idx[i] = idx[j]; idx[j] = t;
+                    }
+                } else if (order === 'every-other') {
+                    const evens = idx.filter((n) => (n & 1) === 0);
+                    const odds = idx.filter((n) => (n & 1) === 1);
+                    idx.length = 0;
+                    idx.push(...evens, ...odds);
+                }
+                for (const k of idx) assert.strictEqual(pool.release(held[k]), true);
+                assert.strictEqual(pool.used, 0);
+                assert.strictEqual(pool.free, N);
+                assert.strictEqual(pool.used + pool.free, pool.size);
+            });
+        }
+
+        test('conservation holds after every op in a churn loop', () => {
+            const N = 32;
+            const pool = createPool({ size: N, expand: false });
+            const held = new Array(N);
+            for (let i = 0; i < N; i++) held[i] = pool.acquire();
+            let seed = 7;
+            for (let i = 0; i < 5000; i++) {
+                seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+                const k = seed & (N - 1);
+                assert.strictEqual(pool.release(held[k]), true);
+                held[k] = pool.acquire();
+                assert.strictEqual(pool.used + pool.free, pool.size);
+            }
+            assert.strictEqual(pool.used, N);
+        });
+    });
+
+    describe('re-entrancy', () => {
+        test('reset() may release a sibling re-entrantly; both return to free', () => {
+            let sibling = null;
+            let reentered = false;
+            const pool = new ObjectPool({
+                create: () => ({}),
+                size: 2,
+                reset: () => {
+                    if (sibling !== null && !reentered) { reentered = true; pool.release(sibling); }
+                },
+            });
+            const ra = pool.acquire();
+            const rb = pool.acquire();
+            sibling = rb;
+            assert.strictEqual(pool.release(ra), true);
+            assert.strictEqual(pool.used, 0);
+            assert.strictEqual(pool.free, 2);
+        });
+
+        test('reset() may re-acquire re-entrantly', () => {
+            let self = null;
+            let guard = false;
+            const pool = new ObjectPool({
+                create: () => ({ v: 0 }),
+                size: 2,
+                expand: true,
+                reset: () => { if (!guard) { guard = true; self.acquire(); } },
+            });
+            self = pool;
+            const x = pool.acquire();
+            pool.release(x);
+            assert.strictEqual(pool.used, 1);
+            assert.strictEqual(pool.used + pool.free, pool.size);
+        });
+
+        test('a throwing reset leaves the object re-poolable (swap-removed first)', () => {
+            const pool = new ObjectPool({
+                create: () => ({}),
+                reset: () => { throw new Error('boom'); },
+                size: 1,
+            });
+            const t = pool.acquire();
+            assert.throws(() => pool.release(t), /boom/);
+            assert.strictEqual(pool.used, 0);
+            assert.strictEqual(pool.free, 1); // not lost -- v1 dropped it to free=0
+        });
+    });
+
+    describe('growth edges', () => {
+        test('size:0 with expand grows a bounded chunk on first acquire', () => {
+            const pool = new ObjectPool({ create: () => ({}), size: 0, expand: true });
+            assert.strictEqual(pool.size, 0);
+            assert.notStrictEqual(pool.acquire(), null);
+            assert.ok(pool.size > 0);
+            assert.strictEqual(pool.used, 1);
+        });
+
+        test('at maxSize, acquire returns null repeatedly and the pool stays usable', () => {
+            const pool = new ObjectPool({ create: () => ({ v: 0 }), size: 2, expand: true, maxSize: 2 });
+            const a = pool.acquire();
+            pool.acquire();
+            for (let i = 0; i < 5; i++) assert.strictEqual(pool.acquire(), null);
+            assert.strictEqual(pool.release(a), true);
+            assert.notStrictEqual(pool.acquire(), null); // reuses the freed slot
+        });
+
+        test('sealed factory keeps working across a chunked expansion', () => {
+            const pool = new ObjectPool({
+                create: () => Object.seal({ x: 0 }),
+                reset: (o) => { o.x = 0; },
+                size: 1,
+                expand: true,
+                maxSize: 300,
+            });
+            for (let i = 0; i < 250; i++) assert.notStrictEqual(pool.acquire(), null);
+            assert.ok(pool.size <= 300);
+        });
+
+        test('create() throwing mid-growth-chunk propagates, stays conserved, remains usable', () => {
+            let count = 0;
+            let boom = true;
+            const LIMIT = 34; // fewer than one GROW_CHUNK (256) -- throw partway
+            const pool = new ObjectPool({
+                create: () => { if (boom && count >= LIMIT) throw new Error('create boom'); count++; return { n: count }; },
+                size: 0,
+                expand: true,
+            });
+            // First acquire triggers a grow chunk; create throws partway through it.
+            assert.throws(() => pool.acquire(), /create boom/);
+            // The partial chunk is retained and the structure is conserved.
+            assert.strictEqual(pool.used, 0);
+            assert.strictEqual(pool.size, LIMIT);
+            assert.strictEqual(pool.free, LIMIT);
+            assert.strictEqual(pool.used + pool.free, pool.size);
+            // Still usable: it serves the partially-built chunk before growing a
+            // fresh one.
+            boom = false;
+            for (let i = 0; i < LIMIT; i++) assert.notStrictEqual(pool.acquire(), null);
+            assert.strictEqual(pool.used, LIMIT);
+            assert.notStrictEqual(pool.acquire(), null); // grows a fresh full chunk
+            assert.ok(pool.size > LIMIT);
+            assert.strictEqual(pool.used + pool.free, pool.size);
+        });
+
+        test('acquire after releaseAll reuses the same object identities', () => {
+            const N = 8;
+            const pool = createPool({ size: N, expand: false });
+            const first = new Set();
+            for (let i = 0; i < N; i++) first.add(pool.acquire());
+            pool.releaseAll();
+            const second = new Set();
+            for (let i = 0; i < N; i++) second.add(pool.acquire());
+            assert.strictEqual(second.size, N);
+            for (const o of second) assert.ok(first.has(o)); // no new objects created
+        });
+    });
+
+    describe('lifecycle edges', () => {
+        test('destroy on a never-used pool is safe and marks it destroyed', () => {
+            const pool = createPool();
+            assert.doesNotThrow(() => pool.destroy());
+            assert.throws(() => pool.acquire(), /destroyed pool/);
+        });
+
+        test('double destroy after a drain stays a no-op', () => {
+            const pool = createPool({ size: 2 });
+            pool.acquire();
+            pool.destroy();
+            assert.doesNotThrow(() => pool.destroy());
+            assert.strictEqual(pool.used, 0);
+            assert.strictEqual(pool.free, 0);
+        });
+
+        test('a released-then-reacquired-then-released object cycles cleanly', () => {
+            const pool = createPool({ size: 1 });
+            const a = pool.acquire();
+            assert.strictEqual(pool.release(a), true);
+            const b = pool.acquire();
+            assert.strictEqual(b, a);
+            assert.strictEqual(pool.release(b), true);
+            assert.strictEqual(pool.release(b), false); // now a genuine double-release
+        });
+
+        test('forEachActive throws a named error for a non-function callback, regardless of pool state', () => {
+            // The policy must NOT depend on whether the pool holds active objects
+            // (that state-dependence was the v2.0.0-rc defect). Same answer both ways.
+            for (const bad of [123, undefined, null, {}, 'nope']) {
+                const empty = createPool({ size: 2 });
+                assert.throws(() => empty.forEachActive(bad),
+                    (err) => err instanceof TypeError && /^ObjectPool: "callback"/.test(err.message),
+                    `empty pool did not throw a named error for ${String(bad)}`);
+
+                const active = createPool({ size: 2 });
+                active.acquire();
+                assert.throws(() => active.forEachActive(bad),
+                    (err) => err instanceof TypeError && /^ObjectPool: "callback"/.test(err.message),
+                    `active pool did not throw a named error for ${String(bad)}`);
+            }
+        });
+
+        test('forEachActive without a thisArg calls the callback plainly', () => {
+            const pool = createPool({ size: 2 });
+            pool.acquire();
+            let n = 0;
+            pool.forEachActive(() => { n++; });
+            assert.strictEqual(n, 1);
         });
     });
 
@@ -673,7 +1300,6 @@ describe('ObjectPool', () => {
         test('handles acquire -> mutate -> release -> reacquire cycle', () => {
             const pool = createPool({ size: 100 });
 
-            // Simulate a burst of 50 particles
             const active = [];
             for (let i = 0; i < 50; i++) {
                 const p = pool.acquire();
@@ -685,17 +1311,28 @@ describe('ObjectPool', () => {
             assert.strictEqual(pool.used, 50);
             assert.strictEqual(pool.free, 50);
 
-            // Kill all particles
-            for (const p of active) {
-                pool.release(p);
-            }
+            for (const p of active) pool.release(p);
             assert.strictEqual(pool.used, 0);
             assert.strictEqual(pool.free, 100);
 
-            // Reacquire -- objects are reused (no GC)
             const reused = pool.acquire();
             assert.strictEqual(reused.x, 0); // reset was called
             assert.strictEqual(reused.life, 0);
+        });
+
+        test('kills dying particles from inside forEachActive without a scratch array', () => {
+            const pool = createPool({ size: 20, expand: false });
+            for (let i = 0; i < 20; i++) {
+                const p = pool.acquire();
+                p.life = (i % 2 === 0) ? 0 : 1; // half are dead
+            }
+            pool.forEachActive((p) => {
+                p.life -= 1;
+                if (p.life < 0) pool.release(p); // release the current object -- D3
+            });
+            assert.strictEqual(pool.used, 10);   // the 10 that started at life 1
+            assert.strictEqual(pool.free, 10);
+            pool.forEachActive((p) => assert.ok(p.life >= 0));
         });
     });
 });

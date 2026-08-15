@@ -107,21 +107,22 @@ export function run() {
             () => `T3: release-visited left used=${pool.used} free=${pool.free}`);
     }
 
-    // --- release during forEachActive: a NOT-YET-visited object -------------
+    // --- release the CURRENT object once mid-forEachActive (D3 contract) -----
     {
         const pool = new ObjectPool({ create: () => ({ v: 0 }), size: 4, expand: false });
-        const held = [];
-        for (let i = 0; i < 4; i++) held.push(pool.acquire());
+        for (let i = 0; i < 4; i++) pool.acquire();
         let visits = 0;
         pool.forEachActive((o) => {
             visits++;
-            if (visits === 1) pool.release(held[3]); // remove a slot not yet reached
+            if (visits === 1) pool.release(o); // release the object we were handed
         });
-        // The removed-before-visit object is skipped; conservation still holds.
-        check(pool.used + pool.free === pool.size,
-            () => `T3: release-not-yet-visited broke conservation used=${pool.used} free=${pool.free}`);
+        // Reverse iteration makes releasing the current object safe: all 4 are
+        // still visited exactly once, and exactly one is freed.
+        check(visits === 4, () => `T3: release-current-once visited ${visits} of 4`);
+        check(pool.used === 3 && pool.free === 1 && conserved(pool),
+            () => `T3: release-current-once left used=${pool.used} free=${pool.free}`);
         pool.releaseAll();
-        check(pool.used === 0 && pool.free === 4, () => `T3: cleanup after not-yet-visited failed`);
+        check(pool.used === 0 && pool.free === 4, () => `T3: cleanup after release-current failed`);
     }
 
     // --- releaseAll from inside forEachActive -------------------------------
@@ -154,16 +155,32 @@ export function run() {
         check(conserved(pool), () => `T3: re-entrant acquire broke conservation`);
     }
 
-    // --- fill to maxSize-1, maxSize, one past -------------------------------
+    // --- growth is chunked and hard-capped at maxSize (OP-10) ---------------
+    // v2 grows in bounded contiguous chunks on a free-list miss, clamped by the
+    // remaining room to maxSize -- so a finite cap still yields an EXACT size.
+    // A size:0,maxSize:MAX pool grows to exactly MAX on its first acquire (the
+    // chunk clamps to the 8 slots of room), never one past.
     {
         const MAX = 8;
         const pool = new ObjectPool({ create: () => ({ v: 0 }), size: 0, expand: true, maxSize: MAX });
-        for (let i = 0; i < MAX - 1; i++) check(pool.acquire() !== null, () => `T3: fill to maxSize-1 got null at ${i}`);
-        check(pool.size === MAX - 1, () => `T3: at maxSize-1 size=${pool.size} (expected ${MAX - 1})`);
-        check(pool.acquire() !== null, () => `T3: acquire to reach maxSize returned null`);
+        check(pool.size === 0, () => `T3: pre-grow size=${pool.size} (expected 0)`);
+        for (let i = 0; i < MAX; i++) check(pool.acquire() !== null, () => `T3: fill to maxSize got null at ${i}`);
         check(pool.size === MAX, () => `T3: at maxSize size=${pool.size} (expected ${MAX})`);
+        check(pool.used === MAX, () => `T3: at maxSize used=${pool.used} (expected ${MAX})`);
         check(pool.acquire() === null, () => `T3: acquire one past maxSize != null`);
         check(pool.size === MAX, () => `T3: one past maxSize grew size to ${pool.size}`);
         check(conserved(pool), () => `T3: maxSize boundary broke conservation`);
+    }
+
+    // --- a chunk overshoots a small size but never the cap ------------------
+    // size:1,maxSize:1000: the first miss grows a full GROW_CHUNK (bounded),
+    // so size jumps well past 2 but stays <= maxSize.
+    {
+        const pool = new ObjectPool({ create: () => ({ v: 0 }), size: 1, expand: true, maxSize: 1000 });
+        pool.acquire();            // the one preallocated object
+        pool.acquire();            // first miss -> one chunk created
+        check(pool.size > 2, () => `T3: chunked grow did not overshoot (size=${pool.size})`);
+        check(pool.size <= 1000, () => `T3: chunked grow breached maxSize (size=${pool.size})`);
+        check(conserved(pool), () => `T3: chunked grow broke conservation`);
     }
 }

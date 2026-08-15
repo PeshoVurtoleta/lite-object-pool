@@ -48,6 +48,19 @@ function throwsLib(fn, option, label) {
 
 const c = () => ({});
 
+/**
+ * Assert `fn` throws a library `TypeError` whose message is prefixed
+ * `ObjectPool: create(` -- the fail-closed create()-return-value contract (D1).
+ */
+function throwsCreate(fn, label) {
+    let err = null;
+    try { fn(); } catch (e) { err = e; }
+    check(err !== null, () => `T1: ${label} did not throw (expected library TypeError)`);
+    check(err instanceof TypeError, () => `T1: ${label} threw ${err && err.constructor.name}, expected TypeError`);
+    check(err !== null && err.message.slice(0, 'ObjectPool: create('.length) === 'ObjectPool: create(',
+        () => `T1: ${label} message ${JSON.stringify(err && err.message)} not prefixed "ObjectPool: create("`);
+}
+
 export function run() {
     // --- size ---------------------------------------------------------------
     // 0 and -0 build an empty pool; _totalCreated reflects 0 objects created.
@@ -99,11 +112,13 @@ export function run() {
     // maxSize:NaN is not an integer and not Infinity -> rejected naming maxSize.
     throwsLib(() => new ObjectPool({ create: c, size: 1, maxSize: NaN }), 'maxSize', 'maxSize:NaN');
 
-    // maxSize:Infinity (the default) is accepted; expansion is unbounded.
+    // maxSize:Infinity (the default) is accepted; expansion is unbounded and,
+    // in v2, chunked -- the first miss grows a bounded contiguous run, so size
+    // jumps past 2 but the pool keeps serving.
     const mInf = new ObjectPool({ create: c, size: 1, maxSize: Infinity });
     check(mInf.acquire() !== null, () => `T1: maxSize:Infinity -> first acquire null`);
     check(mInf.acquire() !== null, () => `T1: maxSize:Infinity -> expansion refused`);
-    check(mInf.size === 2, () => `T1: maxSize:Infinity -> size ${mInf.size} (expected 2)`);
+    check(mInf.size > 1, () => `T1: maxSize:Infinity -> size ${mInf.size} did not grow`);
 
     // Every maxSize strictly below size is a contradiction and throws naming
     // maxSize -- the OP-02 fix. Nothing is preallocated first.
@@ -144,46 +159,36 @@ export function run() {
     throwsLib(() => new ObjectPool({ create: c, reset: 5 }), 'reset', 'reset:5');
     throwsLib(() => new ObjectPool({ create: c, reset: {} }), 'reset', 'reset:{}');
 
-    // --- create return values -----------------------------------------------
-    // create -> null: the pool cheerfully pools `null`; acquire hands it back
-    // and used still increments (it is a real Set member).
-    const cNull = new ObjectPool({ create: () => null, size: 2 });
-    check(cNull.size === 2, () => `T1: create->null -> size ${cNull.size}`);
-    check(cNull.acquire() === null, () => `T1: create->null -> acquire not null`);
-    check(cNull.used === 1, () => `T1: create->null -> used ${cNull.used} (expected 1)`);
+    // --- create return values (v2.0.0, D1) ----------------------------------
+    // The sparse set tracks each object by identity in a WeakMap, whose keys
+    // must be distinct objects. A create() that returns a non-object or a
+    // duplicate identity is a fail-closed error at the point of creation
+    // (naming the library), not silent pooling of null/duplicates as in v1.
 
-    // create -> undefined: acquire returns undefined, used increments.
-    const cUndef = new ObjectPool({ create: () => undefined, size: 2 });
-    check(cUndef.acquire() === undefined, () => `T1: create->undefined -> acquire not undefined`);
-    check(cUndef.used === 1, () => `T1: create->undefined -> used ${cUndef.used}`);
+    // create -> null / undefined / primitive: rejected at construction with a
+    // library `TypeError` naming create(), never pooled.
+    throwsCreate(() => new ObjectPool({ create: () => null, size: 2 }), 'create->null');
+    throwsCreate(() => new ObjectPool({ create: () => undefined, size: 2 }), 'create->undefined');
+    throwsCreate(() => new ObjectPool({ create: () => 5, size: 2 }), 'create->primitive');
 
-    // create -> primitive: acquire returns the primitive; release via the Set
-    // guard still works (Set membership is by value for primitives).
-    const cPrim = new ObjectPool({ create: () => 5, size: 2 });
-    const prim = cPrim.acquire();
-    check(prim === 5, () => `T1: create->primitive -> acquire ${String(prim)} (expected 5)`);
-    check(cPrim.used === 1, () => `T1: create->primitive -> used ${cPrim.used}`);
-    // Capture the result BEFORE asserting: calling release() again inside the
-    // message thunk would report the value of a SECOND, double-release call.
-    const primReleased = cPrim.release(prim);
-    check(primReleased === true, () => `T1: create->primitive -> release ${primReleased}`);
+    // create -> a function is a valid object identity (WeakMap accepts it).
+    const cFn = new ObjectPool({ create: () => () => {}, size: 2 });
+    check(cFn.size === 2, () => `T1: create->function -> size ${cFn.size}`);
+    check(typeof cFn.acquire() === 'function', () => `T1: create->function -> acquire not a function`);
 
-    // create -> THE SAME OBJECT every call: the free list holds N refs to one
-    // object, but the `_out` Set collapses them to a single member, so `used`
-    // can never exceed 1 no matter how many are acquired.
+    // create -> THE SAME OBJECT every call: the second creation is a duplicate
+    // identity and is rejected at construction (each pooled object must be
+    // distinct), rather than v1's silent collapse to a single Set member.
     const same = {};
-    const cSame = new ObjectPool({ create: () => same, size: 3 });
-    check(cSame.size === 3, () => `T1: create->same -> size ${cSame.size}`);
-    check(cSame.free === 3, () => `T1: create->same -> free ${cSame.free}`);
-    check(cSame.acquire() === same, () => `T1: create->same -> acquire not the shared object`);
-    check(cSame.used === 1, () => `T1: create->same -> used ${cSame.used} (expected 1)`);
-    cSame.acquire(); // second acquire re-adds the same Set member -- no-op
-    check(cSame.used === 1, () => `T1: create->same -> used grew past 1 to ${cSame.used}`);
+    throwsCreate(() => new ObjectPool({ create: () => same, size: 3 }), 'create->same');
+    // size:1 needs only one creation, so the same-object pool is legal there.
+    const cSame1 = new ObjectPool({ create: () => same, size: 1 });
+    check(cSame1.acquire() === same, () => `T1: create->same size:1 -> acquire not the shared object`);
 
     // --- reset behaviour ----------------------------------------------------
-    // reset that throws: release() deletes from `_out` BEFORE calling reset();
-    // when reset throws, the object is neither in `_out` nor pushed to `_free`
-    // -- it is LOST. used=0 and free=0 is the honest (buggy) pin; P2 owns it.
+    // reset that throws: release() swap-removes the object BEFORE calling reset,
+    // so when reset throws the object is already back in the free region -- it
+    // is re-poolable, NOT lost. used=0, free=1 is the v2 pin (v1 lost it: free=0).
     const cThrow = new ObjectPool({
         create: c,
         reset: () => { throw new Error('boom'); },
@@ -191,8 +196,8 @@ export function run() {
     });
     const t = cThrow.acquire();
     throws(() => cThrow.release(t), 'Error', 'reset-throws release');
-    check(cThrow.used === 0, () => `T1: reset-throws -> used ${cThrow.used} (expected 0; object dropped from _out)`);
-    check(cThrow.free === 0, () => `T1: reset-throws -> free ${cThrow.free} (expected 0; object lost, not re-pooled)`);
+    check(cThrow.used === 0, () => `T1: reset-throws -> used ${cThrow.used} (expected 0)`);
+    check(cThrow.free === 1, () => `T1: reset-throws -> free ${cThrow.free} (expected 1; swap-removed before reset, re-poolable)`);
 
     // reset that RETURNS a value: the return value is ignored; release() still
     // reports true and re-pools the object.

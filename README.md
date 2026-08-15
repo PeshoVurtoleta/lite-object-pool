@@ -23,20 +23,21 @@ collector a fresh object on every spawn.
 
 ## Features
 
-- **O(1) acquire and release** -- stack-based free list (pop/push)
-- **O(1) double-release protection** -- Set-based guard, not O(N) `includes()`
+- **Zero allocation on the hot path** -- a fully preallocated pool doing
+  acquire / release / releaseAll / forEachActive allocates **0 bytes** (since
+  2.0.0; measured, gated on every CI run)
+- **O(1) acquire and release** -- cursor advance + swap-remove over a sparse set
+- **O(1) double-release and foreign-object protection** -- an index cross-check,
+  no hash table on the hot path
 - **Preallocates objects** at creation -- the object itself is never re-created
-- **Optional auto-expansion** with a `maxSize` ceiling -- graceful under spikes
-- **`forEachActive()`** -- iterate acquired objects in game loops without exposing internals
+- **Optional auto-expansion** in bounded chunks with a `maxSize` ceiling
+- **`forEachActive()`** with a reverse-iteration contract -- release the current
+  object mid-loop safely, no scratch array
 - **User-defined `reset()`** -- ensures clean state on reuse
 - **`releaseAll()`** -- batch release for scene transitions
 - **Stats** -- `size`, `used`, `free` for runtime tuning
 - **Generic TypeScript support** -- full type inference on acquire/release
-- **Zero runtime dependencies, < 1 KB**
-
-One of these does not yet hold as written in 1.1.0. See
-[Known issues](#known-issues-in-110) -- it is measured, reproducible, and fixed
-in 2.0.0. (The `maxSize` cap defect was fixed in 1.1.0.)
+- **Zero runtime dependencies, single file**
 
 ## Installation
 
@@ -53,7 +54,7 @@ import { ObjectPool } from '@zakkster/lite-object-pool';
 
 const particles = new ObjectPool({
     size: 200,
-    maxSize: 1000,  // expansion ceiling -- see Known issues
+    maxSize: 1000,  // expansion ceiling
     create: () => ({ x: 0, y: 0, vx: 0, vy: 0, life: 0 }),
     reset: (p) => { p.x = p.y = p.vx = p.vy = p.life = 0; },
 });
@@ -94,11 +95,15 @@ received 2.5 (number)`. Validation is constructor-cold and adds nothing to
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `.acquire()` | `T \| null` | Get an object. Returns `null` if empty and `expand` is false (or at `maxSize`). |
-| `.release(obj)` | `boolean` | Return an object. Returns `false` on double-release or foreign object. |
-| `.releaseAll()` | `void` | Release all acquired objects. Calls `reset()` on each. |
-| `.forEachActive(fn)` | `void` | Execute a callback for every acquired (active) object. |
-| `.destroy()` | `void` | Tear down the pool. Idempotent. |
+| `.acquire()` | `T \| null` | Get an object. Returns `null` if empty and `expand` is false (or at `maxSize`). **Throws** on use-after-destroy. |
+| `.release(obj)` | `boolean` | Return an object. Returns `false` on a genuine double-release; **throws** on a foreign object (never issued here) and on use-after-destroy. |
+| `.releaseAll()` | `void` | Release all acquired objects. Calls `reset()` on each. Throws on use-after-destroy. |
+| `.forEachActive(fn, thisArg?)` | `void` | Callback for every active object, in reverse. Releasing the current object mid-loop is safe. Order is unspecified. Throws on use-after-destroy. |
+| `.destroy()` | `void` | Drain (reset everything still out) then tear down. Idempotent. |
+
+Since 2.0.0 the pool tracks objects by identity in a `WeakMap`, so `create()`
+must return a distinct object (or function) each call; a non-object or a
+duplicate identity throws a `TypeError` naming `create()`.
 
 ### Properties
 
@@ -108,45 +113,38 @@ received 2.5 (number)`. Validation is constructor-cold and adds nothing to
 | `.used` | `number` | Currently acquired objects |
 | `.free` | `number` | Available objects in the free list |
 
-**Invariant:** `used + free === size` (when no expansion occurs during the check)
+**Invariant:** `used + free === size` after every operation.
 
 ## How It Works
 
-**Preallocation:** The constructor calls `create()` N times and stores the results. Your objects are built once and reused; `acquire()` never calls `create()` while the free list is non-empty.
+**Preallocation:** The constructor calls `create()` N times and stores the results. Your objects are built once and reused; `acquire()` never calls `create()` while a free slot exists.
 
-**Free list (stack):** Acquire pops from the end of an array. Release pushes back. Both are O(1). Stacks are the fastest data structure for object pools.
+**Sparse set:** The pool keeps all objects in an `_items[]` store and partitions their indices into `[active | free]` with a dense/sparse `Uint32Array` index pair and an active cursor. `acquire()` is a cursor advance; `release()` is an O(1) swap-remove. Neither touches a hash table, and neither allocates.
 
-**Double-release guard:** A `Set` tracks which objects are currently "checked out." `release()` checks `Set.delete(obj)` -- if it returns `false`, the object wasn't checked out (double-release or foreign), so it's silently ignored. `Set.has/add/delete` are all O(1).
+**Double-release and foreign-object guard:** Each object's slot index lives in a per-instance `WeakMap`, written once when the object is created and only READ afterwards (reads never rehash, so the hot path is zero-alloc). `release()` looks up the index and cross-checks `pos < active`: a foreign object throws, a genuine double-release returns `false`.
 
-**Expansion:** When the pool is empty and `expand` is `true`, a new object is created on the fly. This ensures your system degrades gracefully during spikes rather than crashing. The `size` counter increments to reflect the growth. When `maxSize` is set, *expansion* stops at that limit.
+**Expansion:** When the pool is empty and `expand` is `true`, a bounded contiguous chunk of new objects is created (256, clamped by the remaining room to `maxSize`) -- not one object per acquire with a backing-store regrow. `size` reflects the growth; with a finite `maxSize` the chunk clamps so the cap stays exact.
 
-## Known issues in 1.1.0
+## Zero allocation, measured
 
-This one is reproduced on every run of the package's own torture gate
-(`npm run torture`), which prints it with the number it measured. It is listed
-here rather than discovered later, because one of the claims above depends on
-it. (The `maxSize` cap defect listed here in 1.0.3 was fixed in 1.1.0 -- a
-contradictory `{maxSize < size}` now throws at construction.)
-
-**`acquire()` allocates, even on a fully preallocated pool.** The pooled objects
-are reused as promised, but the `_out` `Set` that guards against
-double-release rehashes its internal table as it grows -- and it grows during
-exactly the spawn spike this package exists to absorb. Measured on node
-v26.3.1: draining a preallocated 20,000-object pool retains **66.1 bytes per
-`acquire()`**. Steady 1:1 churn at capacity is far cheaper (0.44 B per
-acquire/release pair) because the table has stopped growing. Reproduce:
+A fully preallocated pool allocates **0 bytes** across any sequence of acquire /
+release / releaseAll / forEachActive. This is gated on every run of the
+package's own torture suite (`npm run torture`) with `@zakkster/lite-gc-profiler`
+at `maxMajor: 0, maxPauseMs: 4, maxArrayBuffersGrowth: 0`, plus a netted
+bytes-per-op check against a positive control. In v1.1.0 the `_out` `Set` rehashed
+as it grew and draining a preallocated 20,000-object pool retained **1,321,024
+bytes**; in 2.0.0 that is **0**. Reproduce the before/after:
 
 ```bash
-node --expose-gc -e 'import("@zakkster/lite-object-pool").then(({ObjectPool})=>{const p=new ObjectPool({create:()=>({x:0}),size:20000});globalThis.gc();globalThis.gc();const b=process.memoryUsage().heapUsed;for(let i=0;i<20000;i++)p.acquire();console.log("bytes:",process.memoryUsage().heapUsed-b)})'
+node --expose-gc -e 'import("@zakkster/lite-object-pool").then(({ObjectPool})=>{const p=new ObjectPool({create:()=>({x:0}),size:20000,expand:false});globalThis.gc();globalThis.gc();const b=process.memoryUsage().heapUsed;for(let i=0;i<20000;i++)p.acquire();globalThis.gc();globalThis.gc();console.log("retained bytes:",process.memoryUsage().heapUsed-b)})'
 ```
-
-Fixed in 2.0.0, which replaces the `Set` with a sparse set and drops the figure
-to 0 B per call. Until then, treat "no allocations during gameplay" as true of
-your objects and false of the pool's bookkeeping.
 
 ## Game Loop Example
 
-The `forEachActive()` method lets you iterate over all acquired objects without maintaining a separate array or accessing private fields:
+`forEachActive()` iterates over all acquired objects without maintaining a
+separate array. Because iteration runs in reverse, you can release the object you
+were handed **inside the callback** -- no `dead[]` scratch array, no allocation
+per frame:
 
 ```javascript
 const particles = new ObjectPool({
@@ -159,7 +157,7 @@ const particles = new ObjectPool({
 function spawnBurst(x, y, count) {
     for (let i = 0; i < count; i++) {
         const p = particles.acquire();
-        if (!p) break; // pool exhausted
+        if (!p) break; // pool exhausted this frame (not an error)
         p.x = x;
         p.y = y;
         p.vx = (Math.random() - 0.5) * 4;
@@ -169,20 +167,19 @@ function spawnBurst(x, y, count) {
 }
 
 function update(dt) {
-    const dead = [];
-
     particles.forEachActive((p) => {
         p.x += p.vx;
         p.y += p.vy;
         p.vy += 0.1; // gravity
         p.life -= dt;
 
-        if (p.life <= 0) dead.push(p);
+        if (p.life <= 0) particles.release(p); // safe: reverse iteration (2.0.0)
     });
-
-    for (const p of dead) particles.release(p);
 }
 ```
+
+Do NOT rely on iteration order: since 2.0.0 it is unspecified (swap-remove does
+not preserve spawn order). If you need a stable draw order, keep your own index.
 
 ## Use Cases
 
@@ -264,9 +261,18 @@ npm install @zakkster/lite-object-pool
 ```
 
 The unscoped package is deprecated and receives no further releases. Later
-scoped versions do introduce breaking changes -- `1.1.0` makes a contradictory
-`{maxSize < size}` throw, and `2.0.0` rewrites the internals -- and each will
-carry its own migration notes in [CHANGELOG.md](./CHANGELOG.md).
+scoped versions do introduce breaking changes -- each with migration notes in
+[CHANGELOG.md](./CHANGELOG.md):
+
+- **`1.1.0`** makes a contradictory `{maxSize < size}` throw.
+- **`2.0.0`** rewrites the internals to a sparse set (zero allocation on the hot
+  path). Behaviour changes worth checking before you upgrade: iteration order is
+  now unspecified; `release()` of a foreign object and any use-after-destroy now
+  throw (a genuine double-release still returns `false`); `destroy()` now drains;
+  `create()` must return a distinct object each call; and expansion grows in
+  bounded chunks. The option shape `{create, reset, size, expand, maxSize}` is
+  unchanged -- a capacity/prealloc reshape lands additively in `2.1.0`, so your
+  existing config keeps working.
 
 ## Ecosystem
 

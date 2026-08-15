@@ -9,6 +9,113 @@ Version is synced in three places from 1.0.3 forward: `package.json`, the
 `VERSION` const exported from `ObjectPool.js`, and the header line of
 `llms.txt`.
 
+## [2.0.0] -- 2026-08-15
+
+Session P2a. The headline sentence -- "no allocations during gameplay" -- is now
+true and measured: draining a fully preallocated 20,000-object pool went from
+retaining **1,321,024 bytes to 0**. The v1 `_out` Set is replaced by a sparse
+set (an `_items[]` object store, a dense/sparse `Uint32Array` index pair, and an
+active cursor), with each object's slot index kept in a per-instance `WeakMap`
+that is written once at create time and only READ on the hot path -- reads never
+rehash, so `acquire` / `release` / `releaseAll` / `forEachActive` allocate zero
+bytes on a preallocated pool. The design is recorded in `decisions/` (D1
+structure + the WeakMap-vs-symbol measurement, D2 order, D3 iteration, D4
+exhaustion) and `probe/poly.mjs`.
+
+The option shape `{create, reset, size, expand, maxSize}` is UNCHANGED. The
+capacity/prealloc/onExhausted reshape is deferred to **2.1.0** and is ADDITIVE --
+it adds option names and removes none, so existing config keeps working and no
+second migration is forced. This split keeps the headline allocation fix
+separately provable from the option reshape.
+
+### Breaking changes
+
+- **Iteration order is now UNSPECIFIED (OP-06, D2).** `forEachActive` and
+  `releaseAll` visited objects in insertion order in v1 (a Set-insertion-order
+  accident, nothing documented it). Swap-remove does not preserve it, and v2
+  spends nothing trying to. Anyone relying on a stable draw order -- z-order by
+  spawn time is the obvious one -- must keep their own ordered index or they will
+  see draw order change. This is the loudest line of the migration.
+- **`release()` THROWS on a foreign object (OP-05, D4).** An object this pool
+  never issued -- including `null`, `undefined`, primitives, and a sibling pool's
+  object -- was a silent `false` in v1. It now throws a `TypeError`:
+  `ObjectPool: release() called with an object this pool did not issue`. A genuine
+  double-release (an object that WAS issued but is not currently checked out)
+  still returns `false`.
+- **Use-after-destroy THROWS (OP-11, D4).** `acquire()` on a destroyed pool
+  returned `null` in v1 (indistinguishable from "exhausted"); it now throws
+  `ObjectPool: acquire() called on a destroyed pool`. `release()`, `releaseAll()`
+  and `forEachActive()` on a destroyed pool likewise throw named errors (v1
+  silently no-op'd). Exhausted/capped `acquire()` still returns `null` -- an
+  expected runtime condition, not a bug.
+- **`destroy()` now DRAINS then tears down (OP-09).** It calls `reset()` on every
+  object still checked out before releasing references, so pooled DOM elements or
+  WebSocket messages get their cleanup. Still idempotent. v1 reset nothing on
+  destroy.
+- **`create()` must return a distinct object (D1).** The WeakMap that tracks slot
+  indices needs object keys and distinct identities. `create()` returning a
+  non-object (`null`, `undefined`, a primitive) now throws a `TypeError` naming
+  `create()`; returning an object the pool already holds (the "same object every
+  call" case) throws `each pooled object must be a distinct identity`. v1 pooled
+  `null` and silently collapsed duplicates via the Set. This is a behaviour change
+  in its own right, not folded into the rewrite: it is fail-closed where v1 was
+  silent.
+- **Unknown constructor keys now throw (fail closed).** In 1.1.0 a stray option
+  key was silently ignored: `new ObjectPool({ create, capacity: 99, typoo: 1 })`
+  constructed a pool and did nothing with either extra key. That is the
+  fail-open-on-typo shape the suite law forbids, and it is a live footgun now
+  that this CHANGELOG advertises `capacity`/`prealloc` for 2.1.0. As of 2.0.0 any
+  key outside `create` / `reset` / `size` / `expand` / `maxSize` throws a
+  `TypeError` naming the key, with a did-you-mean hint over the five known names
+  (`{maxsize: 4}` -> `did you mean "maxSize"?`). The three reserved future names
+  `capacity`, `prealloc`, `onExhausted` throw a message pointing at the additive
+  2.1.0 reshape instead of a generic error. A config that silently did nothing in
+  1.1.0 now throws. Ordered after the per-option validation, so a bad `size` plus
+  a typo'd key still reports the `size` error first.
+- **A non-function `forEachActive` callback always throws a named error.** In v1
+  (and the v2.0.0 release candidate) the answer depended on pool state: a raw
+  `TypeError` when the pool held active objects, a silent no-op when it did not.
+  It now validates the callback once, before the loop, and throws
+  `ObjectPool: "callback" must be a function, received ...` regardless of state.
+  An omitted/`undefined` callback is a caller bug and throws.
+- **Expansion allocates in bounded chunks (OP-10).** On a free-list miss v2
+  constructs a bounded contiguous run (256 objects, clamped by the remaining room
+  to `maxSize`) instead of one object per `acquire` with a `push()` regrow of the
+  backing store. Consequence: with an unbounded `maxSize`, `size` can jump by a
+  chunk on the first miss rather than incrementing by one. With a finite
+  `maxSize` the chunk clamps to the remaining room, so the cap stays exact.
+
+### Added
+
+- `forEachActive(callback, thisArg?)` -- an optional `thisArg` binds the callback
+  receiver so callers can pass a method without allocating a bound closure per
+  frame.
+- The **reverse-iteration contract (OP-07, D3)**: `forEachActive` walks the dense
+  array backwards, which makes releasing the object currently passed to your
+  callback safe and contractual for the first time. `releaseAll()` mid-iteration
+  stops the walk; other structural mutation during iteration is unspecified.
+- Torture T5 (`t5-fuzz.mjs`) filled: 100k mixed ops against a v1-style Set+free-list
+  oracle, comparing `used`, `free`, `size` and the sorted set of active identities
+  after every op. Order is deliberately not compared (that is D2).
+
+### Fixed
+
+- **OP-01 (S1) -- a fully preallocated pool no longer allocates on `acquire()`.**
+  The T6 gate's two ratchets (v1.1.0: 66.78 and 42.10 B/acquire) are now live
+  `check(=== 0)` gates, measured as netted `heap.allocBytes` over a discrimination
+  window with a mandatory positive control (a lane that must read non-zero, or the
+  instrument is blind).
+- **OP-08 (S3)** -- the per-call iterator objects of `releaseAll` / `forEachActive`
+  are gone (plain reverse index loops), a side effect of the rewrite.
+
+### Changed
+
+- README game-loop example rewritten to use the reverse-iteration contract and to
+  DELETE the `dead[]` array (OP-07). The documented pattern no longer allocates a
+  scratch array every frame.
+- `ObjectPool.d.ts`, `llms.txt` document the v2 contract; `ObjectPool<T>` now
+  constrains `T extends object`.
+
 ## [1.1.0] -- 2026-08-15
 
 Session P1. `maxSize` becomes a real bound and the constructor validates every
