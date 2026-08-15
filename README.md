@@ -34,9 +34,9 @@ collector a fresh object on every spawn.
 - **Generic TypeScript support** -- full type inference on acquire/release
 - **Zero runtime dependencies, < 1 KB**
 
-Two of these do not yet hold as written in 1.0.3. See
-[Known issues](#known-issues-in-103) -- they are measured, reproducible, and
-fixed in 1.1.0 and 2.0.0.
+One of these does not yet hold as written in 1.1.0. See
+[Known issues](#known-issues-in-110) -- it is measured, reproducible, and fixed
+in 2.0.0. (The `maxSize` cap defect was fixed in 1.1.0.)
 
 ## Installation
 
@@ -81,8 +81,14 @@ particles.releaseAll();
 | `create` | `() => T` | *required* | Factory function that returns a new object |
 | `reset` | `(obj: T) => void` | no-op | Called on release to clean an object for reuse |
 | `size` | `number` | `32` | Initial pool size (preallocated) |
-| `expand` | `boolean` | `true` | Auto-create objects when pool is exhausted |
-| `maxSize` | `number` | `Infinity` | Ceiling on auto-expansion. **Not a cap on `size` in 1.0.3** -- see [Known issues](#known-issues-in-103) |
+| `expand` | `boolean` | `true` | Auto-create objects when pool is exhausted. Strict boolean -- `0`/`''`/`'false'` throw |
+| `maxSize` | `number` | `Infinity` | Ceiling on expansion. A finite integer `>= 0` or `Infinity`, and **must be `>= size`** -- a contradictory `{maxSize < size}` throws at construction (since 1.1.0) |
+
+Every option is validated in the constructor. A bad value throws a `TypeError`
+whose message is prefixed `ObjectPool: "<option>"`, naming both the library and
+the offending option -- e.g. `ObjectPool: "size" must be a finite integer >= 0,
+received 2.5 (number)`. Validation is constructor-cold and adds nothing to
+`acquire()` / `release()`.
 
 ### Methods
 
@@ -114,12 +120,13 @@ particles.releaseAll();
 
 **Expansion:** When the pool is empty and `expand` is `true`, a new object is created on the fly. This ensures your system degrades gracefully during spikes rather than crashing. The `size` counter increments to reflect the growth. When `maxSize` is set, *expansion* stops at that limit.
 
-## Known issues in 1.0.3
+## Known issues in 1.1.0
 
-Both are reproduced on every run of the package's own torture gate
-(`npm run torture`), which prints each one with the number it measured. They
-are listed here rather than discovered later, because two of the claims above
-depend on them.
+This one is reproduced on every run of the package's own torture gate
+(`npm run torture`), which prints it with the number it measured. It is listed
+here rather than discovered later, because one of the claims above depends on
+it. (The `maxSize` cap defect listed here in 1.0.3 was fixed in 1.1.0 -- a
+contradictory `{maxSize < size}` now throws at construction.)
 
 **`acquire()` allocates, even on a fully preallocated pool.** The pooled objects
 are reused as promised, but the `_out` `Set` that guards against
@@ -136,19 +143,6 @@ node --expose-gc -e 'import("@zakkster/lite-object-pool").then(({ObjectPool})=>{
 Fixed in 2.0.0, which replaces the `Set` with a sparse set and drops the figure
 to 0 B per call. Until then, treat "no allocations during gameplay" as true of
 your objects and false of the pool's bookkeeping.
-
-**`maxSize` does not cap `size`.** It limits auto-expansion only. The
-preallocation loop runs `size` times regardless, so `{size: 10, maxSize: 4}`
-builds a pool that reports `size` 10 and hands out 10 objects -- 2.5x the
-number you asked for -- and `{size: 32, maxSize: 0}` preallocates 32 past a cap
-of zero. Reproduce:
-
-```bash
-node -e 'import("@zakkster/lite-object-pool").then(({ObjectPool})=>{const p=new ObjectPool({create:()=>({}),size:10,maxSize:4});let n=0;while(p.acquire())n++;console.log("maxSize 4 handed out",n)})'
-```
-
-Fixed in 1.1.0, where a contradictory `{maxSize < size}` throws at construction
-instead of silently building the wrong pool. Until then, keep `maxSize >= size`.
 
 ## Game Loop Example
 

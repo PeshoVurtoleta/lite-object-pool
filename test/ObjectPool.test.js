@@ -88,6 +88,207 @@ describe('ObjectPool', () => {
     });
 
     // ---------------------------------------------------------------
+    //  Option validation (P1, v1.1.0) -- independent unit coverage of the
+    //  torture suite's T1 tier. The torture gate and the unit suite must
+    //  BOTH be able to catch a validation regression on their own.
+    // ---------------------------------------------------------------
+
+    describe('option validation', () => {
+        const LIB_PREFIX = /^ObjectPool: "[a-zA-Z]+"/;
+
+        describe('size rejection set', () => {
+            for (const bad of [-1, 2.5, NaN, Infinity, '32', null]) {
+                test(`rejects size: ${String(bad)}`, () => {
+                    assert.throws(
+                        () => new ObjectPool({ create: () => ({}), size: bad }),
+                        (err) => err instanceof TypeError && /^ObjectPool: "size"/.test(err.message),
+                    );
+                });
+            }
+
+            test('never lets a bad size reach a raw RangeError from new Array', () => {
+                for (const bad of [-1, 2.5, NaN, Infinity, '32', null]) {
+                    assert.throws(
+                        () => new ObjectPool({ create: () => ({}), size: bad }),
+                        (err) => err.constructor.name === 'TypeError',
+                        `size: ${String(bad)} did not throw a library TypeError`,
+                    );
+                }
+            });
+
+            test('accepts size: 0 and builds an empty, valid pool', () => {
+                const pool = new ObjectPool({ create: () => ({}), size: 0 });
+                assert.strictEqual(pool.size, 0);
+                assert.strictEqual(pool.free, 0);
+                assert.strictEqual(pool.used, 0);
+                // expand defaults to true, so an empty pool still serves the
+                // first acquire by expanding. null is the expand:false path.
+                assert.notStrictEqual(pool.acquire(), null);
+                assert.strictEqual(pool.size, 1);
+            });
+
+            test('size: 0 with expand:false is exhausted from the start', () => {
+                const pool = new ObjectPool({ create: () => ({}), size: 0, expand: false });
+                assert.strictEqual(pool.size, 0);
+                assert.strictEqual(pool.acquire(), null);
+            });
+
+            test('accepts size: -0 as equivalent to 0', () => {
+                const pool = new ObjectPool({ create: () => ({}), size: -0 });
+                assert.strictEqual(pool.size, 0);
+            });
+
+            test('accepts undefined and falls through to the size:32 default', () => {
+                const pool = new ObjectPool({ create: () => ({}), size: undefined });
+                assert.strictEqual(pool.size, 32);
+            });
+        });
+
+        describe('maxSize rejection set', () => {
+            for (const bad of [-1, NaN]) {
+                test(`rejects maxSize: ${String(bad)}`, () => {
+                    assert.throws(
+                        () => new ObjectPool({ create: () => ({}), size: 1, maxSize: bad }),
+                        (err) => err instanceof TypeError && /^ObjectPool: "maxSize"/.test(err.message),
+                    );
+                });
+            }
+
+            test('rejects a non-integer maxSize', () => {
+                assert.throws(
+                    () => new ObjectPool({ create: () => ({}), size: 1, maxSize: 2.5 }),
+                    (err) => err instanceof TypeError && /^ObjectPool: "maxSize"/.test(err.message),
+                );
+            });
+
+            // 50 acquires from a size:1 pool consume the one preallocated
+            // object and then expand 49 times -- final size is 50, not 51.
+            test('defaults maxSize to Infinity when omitted', () => {
+                const pool = new ObjectPool({ create: () => ({}), size: 1, expand: true });
+                for (let i = 0; i < 50; i++) assert.notStrictEqual(pool.acquire(), null);
+                assert.strictEqual(pool.size, 50);
+            });
+
+            test('accepts an explicit maxSize: Infinity as equivalent to the default', () => {
+                const pool = new ObjectPool({ create: () => ({}), size: 1, expand: true, maxSize: Infinity });
+                for (let i = 0; i < 50; i++) assert.notStrictEqual(pool.acquire(), null);
+                assert.strictEqual(pool.size, 50);
+            });
+        });
+
+        describe('the maxSize < size contradiction', () => {
+            test('{size: 10, maxSize: 4} throws naming both options', () => {
+                let err = null;
+                try { new ObjectPool({ create: () => ({}), size: 10, maxSize: 4 }); }
+                catch (e) { err = e; }
+                assert.ok(err instanceof TypeError, 'did not throw a TypeError');
+                assert.match(err.message, /"maxSize"/, 'message does not name maxSize');
+                assert.match(err.message, /"size"/, 'message does not name size');
+                assert.match(err.message, /4/, 'message does not include the maxSize value');
+                assert.match(err.message, /10/, 'message does not include the size value');
+            });
+
+            test('{size: 32, maxSize: 0} throws and create() is never invoked', () => {
+                let created = 0;
+                const countingCreate = () => { created++; return {}; };
+                assert.throws(
+                    () => new ObjectPool({ create: countingCreate, size: 32, maxSize: 0 }),
+                    (err) => err instanceof TypeError && /^ObjectPool: "maxSize"/.test(err.message),
+                );
+                assert.strictEqual(created, 0, 'create() ran before the contradiction check threw');
+            });
+
+            test('every maxSize strictly below size throws, for size 1..5', () => {
+                for (let size = 1; size <= 5; size++) {
+                    for (let maxSize = 0; maxSize < size; maxSize++) {
+                        assert.throws(
+                            () => new ObjectPool({ create: () => ({}), size, maxSize }),
+                            (err) => err instanceof TypeError && LIB_PREFIX.test(err.message),
+                            `size:${size},maxSize:${maxSize} did not throw`,
+                        );
+                    }
+                }
+            });
+
+            test('maxSize === size (the boundary) is accepted, not a contradiction', () => {
+                const pool = new ObjectPool({ create: () => ({}), size: 4, maxSize: 4 });
+                assert.strictEqual(pool.size, 4);
+            });
+
+            test('maxSize === size:0 (both zero) is accepted', () => {
+                const pool = new ObjectPool({ create: () => ({}), size: 0, maxSize: 0 });
+                assert.strictEqual(pool.size, 0);
+                assert.strictEqual(pool.acquire(), null);
+            });
+        });
+
+        describe('expand rejection set', () => {
+            for (const bad of [0, '', null, 1, 'false']) {
+                test(`rejects expand: ${JSON.stringify(bad)}`, () => {
+                    assert.throws(
+                        () => new ObjectPool({ create: () => ({}), size: 1, expand: bad }),
+                        (err) => err instanceof TypeError && /^ObjectPool: "expand"/.test(err.message),
+                    );
+                });
+            }
+
+            test('accepts the two real booleans', () => {
+                assert.doesNotThrow(() => new ObjectPool({ create: () => ({}), size: 1, expand: true }));
+                assert.doesNotThrow(() => new ObjectPool({ create: () => ({}), size: 1, expand: false }));
+            });
+
+            test('expand: false exhaustion returns null, not undefined or a throw', () => {
+                const pool = new ObjectPool({ create: () => ({}), size: 1, expand: false });
+                pool.acquire();
+                const result = pool.acquire();
+                assert.strictEqual(result, null);
+                assert.notStrictEqual(result, undefined);
+            });
+        });
+
+        describe('reset rejection set', () => {
+            for (const bad of [5, {}, 'nope', true]) {
+                test(`rejects reset: ${JSON.stringify(bad)}`, () => {
+                    assert.throws(
+                        () => new ObjectPool({ create: () => ({}), reset: bad }),
+                        (err) => err instanceof TypeError && /^ObjectPool: "reset"/.test(err.message),
+                    );
+                });
+            }
+        });
+
+        describe('validation order and message shape', () => {
+            test('every rejection message is prefixed with the library name and the option', () => {
+                const cases = [
+                    [{ create: () => ({}), size: NaN }, 'size'],
+                    [{ create: () => ({}), size: 1, maxSize: NaN }, 'maxSize'],
+                    [{ create: () => ({}), size: 1, expand: 0 }, 'expand'],
+                    [{ create: () => ({}), reset: 5 }, 'reset'],
+                ];
+                for (const [opts, option] of cases) {
+                    let err = null;
+                    try { new ObjectPool(opts); } catch (e) { err = e; }
+                    assert.ok(err !== null, `${option} case did not throw`);
+                    assert.strictEqual(
+                        err.message.slice(0, `ObjectPool: "${option}"`.length),
+                        `ObjectPool: "${option}"`,
+                        `${option} message was ${JSON.stringify(err.message)}`,
+                    );
+                }
+            });
+
+            test('a bad size is rejected before an otherwise-contradictory maxSize is reported', () => {
+                // Both size and maxSize are bad; size is checked first, so the
+                // thrown message names "size", not "maxSize".
+                assert.throws(
+                    () => new ObjectPool({ create: () => ({}), size: NaN, maxSize: -1 }),
+                    (err) => err instanceof TypeError && /^ObjectPool: "size"/.test(err.message),
+                );
+            });
+        });
+    });
+
+    // ---------------------------------------------------------------
     //  Acquire
     // ---------------------------------------------------------------
 

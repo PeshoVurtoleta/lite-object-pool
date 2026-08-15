@@ -23,7 +23,18 @@
 const NOOP = () => {};
 
 /** Package version. Kept in sync with package.json and llms.txt. */
-export const VERSION = '1.0.3';
+export const VERSION = '1.1.0';
+
+/**
+ * Render a rejected option value for a validation message, e.g. `2.5 (number)`.
+ * Constructor-cold: this runs only on the error path that throws, never on any
+ * hot path. `String(symbol)` throws, so symbols are stringified defensively.
+ * @param {*} v
+ * @returns {string}
+ */
+function received(v) {
+    return (typeof v === 'symbol' ? v.toString() : String(v)) + ' (' + typeof v + ')';
+}
 
 export class ObjectPool {
     /**
@@ -35,8 +46,31 @@ export class ObjectPool {
      * @param {number}   [options.maxSize] Maximum pool size (prevents runaway expansion). Default: Infinity
      */
     constructor({ create, reset = NOOP, size = 32, expand = true, maxSize = Infinity }) {
+        // --- Option validation ------------------------------------------------
+        // Every check here is constructor-cold: it runs once, at construction,
+        // and never on acquire()/release()/forEachActive(). One TypeError per
+        // bad option, every message prefixed `ObjectPool: "<option>"` so the
+        // library and the offending option are both greppable. Ordered
+        // create -> reset -> size -> maxSize -> expand -> the maxSize>=size
+        // contradiction, so the contradiction is only reported once both
+        // numbers are known-clean.
         if (typeof create !== 'function') {
-            throw new TypeError('ObjectPool: "create" callback is required and must be a function');
+            throw new TypeError('ObjectPool: "create" is required and must be a function, received ' + received(create));
+        }
+        if (typeof reset !== 'function') {
+            throw new TypeError('ObjectPool: "reset" must be a function if provided, received ' + received(reset));
+        }
+        if (typeof size !== 'number' || !Number.isInteger(size) || size < 0) {
+            throw new TypeError('ObjectPool: "size" must be a finite integer >= 0, received ' + received(size));
+        }
+        if (maxSize !== Infinity && (typeof maxSize !== 'number' || !Number.isInteger(maxSize) || maxSize < 0)) {
+            throw new TypeError('ObjectPool: "maxSize" must be a finite integer >= 0 or Infinity, received ' + received(maxSize));
+        }
+        if (typeof expand !== 'boolean') {
+            throw new TypeError('ObjectPool: "expand" must be a boolean if provided, received ' + received(expand));
+        }
+        if (maxSize < size) {
+            throw new TypeError('ObjectPool: "maxSize" (' + maxSize + ') must be >= "size" (' + size + ')');
         }
 
         this._create = create;
@@ -44,13 +78,18 @@ export class ObjectPool {
         this._expand = expand;
         this._maxSize = maxSize;
         this._destroyed = false;
-        this._totalCreated = size;
 
         // Free list (stack) -- acquire is pop(), release is push(), both O(1)
         this._free = new Array(size);
         for (let i = 0; i < size; i++) {
             this._free[i] = create();
         }
+
+        // _totalCreated reflects the objects actually constructed above, not the
+        // requested `size`. Validation guarantees `size` is a clean integer and
+        // `maxSize >= size`, so the loop ran exactly `size` times and the free
+        // list holds exactly that many objects.
+        this._totalCreated = this._free.length;
 
         // O(1) double-release and foreign-object guard.
         // Tracks objects currently "checked out" (acquired but not yet released).

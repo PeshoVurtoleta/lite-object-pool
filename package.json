@@ -1,7 +1,7 @@
 {
   "name": "@zakkster/lite-object-pool",
   "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Tiny, fast, zero-dependency object pool with O(1) acquire/release, double-release protection, and auto-expansion for games and particle systems.",
   "type": "module",
   "main": "./ObjectPool.js",

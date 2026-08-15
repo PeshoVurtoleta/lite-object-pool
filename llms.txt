@@ -1,4 +1,4 @@
-# @zakkster/lite-object-pool v1.0.3
+# @zakkster/lite-object-pool v1.1.0
 
 > Zero-dependency object pool for games, particles, and high-frequency object churn. GC-free reuse.
 
@@ -24,9 +24,21 @@ None (standalone). Peers are devDependencies only: @zakkster/lite-gc-profiler,
 `new ObjectPool({ create, reset?, size?, expand?, maxSize? })`
 - `create: () => T` -- Factory function returning a new object (required)
 - `reset: (obj: T) => void` -- Called on release to clean object for reuse (default: no-op)
-- `size: number` -- Initial preallocated pool size (default: 32)
-- `expand: boolean` -- Auto-expand when exhausted (default: true)
-- `maxSize: number` -- Maximum pool size cap (default: Infinity)
+- `size: number` -- Initial preallocated pool size, a finite integer >= 0 (default: 32).
+  A `size` too large to actually preallocate is UNDEFINED until 2.0.0: it passes
+  validation, then fails from the allocation itself (a raw RangeError at or past
+  2**32, an out-of-memory crash below that). There is no bound that fixes this --
+  the unfillable-but-valid band is heap-dependent. Do not recommend a size the
+  caller cannot afford to hold resident.
+- `expand: boolean` -- Auto-expand when exhausted, a strict boolean (default: true)
+- `maxSize: number` -- Ceiling on expansion, a finite integer >= 0 or Infinity, and must be >= size (default: Infinity)
+
+All options are validated in the constructor. A bad option throws a `TypeError`
+whose message is prefixed `ObjectPool: "<option>"` naming the library and the
+offending option. This is constructor-cold only: acquire/release/forEachActive
+gain zero instructions. Since 1.1.0: `{maxSize < size}` throws (was: silently
+built an over-sized pool), and `expand` must be a real boolean -- `0`, `''`,
+`null`, `1`, `'false'` throw rather than coercing.
 
 ## API
 - `.acquire(): T | null` -- Get an object from the pool. Returns null if empty and expand=false.

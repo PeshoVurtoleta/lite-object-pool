@@ -9,6 +9,76 @@ Version is synced in three places from 1.0.3 forward: `package.json`, the
 `VERSION` const exported from `ObjectPool.js`, and the header line of
 `llms.txt`.
 
+## [1.1.0] -- 2026-08-15
+
+Session P1. `maxSize` becomes a real bound and the constructor validates every
+option. No structural change -- the `_out` Set stays until 2.0.0, and OP-01 (the
+per-`acquire` allocation) is deliberately untouched so its fix lands as a
+separately provable commit. The hot path is byte-identical: `acquire`,
+`release` and `forEachActive` gain zero instructions; all validation is
+constructor-cold and runs once.
+
+### Breaking changes
+
+Two, both at construction only. A pool that constructed at 1.0.3 and passed
+neither a contradiction nor a coerced `expand` is unaffected.
+
+- **A contradictory `{maxSize < size}` now throws (OP-02).** `{size: 10,
+  maxSize: 4}` used to build a pool that reported `size` 10 and handed out 10
+  objects -- 2.5x the documented cap -- because `_totalCreated` was set from
+  `size` and the preallocation loop ignored `maxSize`. It now throws a
+  `TypeError`: `ObjectPool: "maxSize" (4) must be >= "size" (10)`. The two
+  numbers contradict each other and only the caller knows which they meant, so
+  the pool fails closed at the door rather than silently allocating a shape you
+  did not ask for. `{size: 32, maxSize: 0}` likewise throws, and now creates
+  **zero** objects before doing so.
+- **`expand` must be a strict boolean.** `expand: 0`, `''`, `null`, `1` and
+  `'false'` used to coerce -- the falsy ones quietly disabled expansion, and
+  `expand: 'false'` was truthy and expanded forever. All now throw
+  `ObjectPool: "expand" must be a boolean if provided, received ...`. A
+  validation layer with one coercing hole teaches the caller that options are
+  checked and then is not; all six options land in the same release and agree.
+
+### Fixed
+
+- **OP-02 (S1) -- `maxSize` is now a cap.** Fixed by the contradiction check
+  above plus setting `_totalCreated` from the number of objects actually
+  created (the filled free list) rather than from the `size` argument. It is no
+  longer possible to construct a pool whose `size` exceeds its `maxSize`, so the
+  torture suite's conjoined `size <= maxSize` law is now a live `check` instead
+  of a recorded `todo`.
+- **OP-03 (S2) -- options are validated with a library error.** `size: -1`,
+  `2.5`, `NaN`, `Infinity`, `'32'` and `null` used to reach `new Array(size)`
+  and throw a raw `RangeError: Invalid array length` naming neither the library
+  nor the option. Every option is now validated in the constructor, in order
+  `create -> reset -> size -> maxSize -> expand -> (maxSize >= size)`, and each
+  bad value throws a `TypeError` whose message is prefixed `ObjectPool: "<opt>"`
+  so it is greppable. `2**32` and `Number.MAX_SAFE_INTEGER` remain a raw
+  `RangeError` from `new Array` on purpose: they are legitimate finite integers
+  >= 0 that pass validation but exceed the JS array-length limit, and validation
+  does not police that limit.
+
+### Changed
+
+- Torture T1 (`t1-degenerate.mjs`) rewritten to pin the validated behaviour:
+  every rejected option asserts a `TypeError` prefixed `ObjectPool: "<opt>"`,
+  the `{size: 32, maxSize: 0}` case asserts the `create` callback ran zero
+  times, and the `create`/`reset` return-value and re-entrant-release cases are
+  pinned.
+- Torture T0's `size <= maxSize` clause flipped from `todo('OP-02')` to a live
+  `check`, plus a throws-case asserting the contradiction is rejected at the
+  door.
+- `ObjectPool.d.ts` drops the 1.0.3 "not a cap" caveat on `maxSize` and
+  documents the constructor's `@throws` cases.
+- `llms.txt` documents the validation contract and the two breaking changes.
+
+### Still open
+
+- **OP-01 (S1)** -- a fully preallocated pool still allocates on every
+  `acquire()` via the `_out` Set rehash (66.1 B/acquire on the drain shape).
+  Untouched here by design; fixed in 2.0.0 by the sparse-set rewrite. The gate
+  still reports it as a ratcheted `todo`.
+
 ## [1.0.3] -- 2026-08-15
 
 Session P0. This release changes **no runtime behaviour**. It builds the

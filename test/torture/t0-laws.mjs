@@ -18,7 +18,7 @@
  */
 
 import { ObjectPool } from '../../ObjectPool.js';
-import { check, conserved, todo, breaking } from './harness.mjs';
+import { check, conserved, breaking } from './harness.mjs';
 
 export function run() {
     // --- Law 1: used + free === size across an operation sequence ------------
@@ -80,14 +80,23 @@ export function run() {
         () => `T0: releaseAll not idempotent (free ${freeAfterAll} -> ${pool.free})`);
     check(conserved(pool), () => `T0: conservation violated after releaseAll`);
 
-    // --- Law 2 (CONJOINED): size <= maxSize. FAILS today (OP-02). ------------
-    // maxSize is not a cap: {size:10,maxSize:4} preallocates 10 and reports
-    // size 10. Record the measured breach; do NOT fail the run (P1 fixes it).
-    const capped = new ObjectPool({ create: () => ({}), size: 10, maxSize: 4 });
-    if (capped.size > 4) {
-        todo('OP-02', `size <= maxSize breached: {size:10,maxSize:4} -> pool.size=${capped.size} ` +
-            `(maxSize is not a cap; ObjectPool.js:36/:40). Fixed in P1.`);
-    } else {
-        check(capped.size <= 4, () => `T0: {size:10,maxSize:4} gave size ${capped.size} (>4)`);
-    }
+    // --- Law 2 (CONJOINED): size <= maxSize. LIVE as of P1 (OP-02 fixed). ----
+    // A contradictory {size:10,maxSize:4} no longer builds a mis-sized pool that
+    // hands out 10 past a cap of 4 -- it throws at the door (P1 validation). The
+    // throw-case IS the law: the only way size can exceed maxSize is prevented
+    // at construction.
+    let capErr = null;
+    try { new ObjectPool({ create: () => ({}), size: 10, maxSize: 4 }); }
+    catch (e) { capErr = e; }
+    check(capErr instanceof TypeError,
+        () => `T0: {size:10,maxSize:4} did not throw TypeError (got ${capErr && capErr.constructor.name})`);
+    check(capErr !== null && /^ObjectPool: "maxSize"/.test(capErr.message),
+        () => `T0: {size:10,maxSize:4} threw an unnamed error: ${capErr && capErr.message}`);
+
+    // And a legitimate {size,maxSize} pool satisfies size <= maxSize at rest and
+    // after expansion right up to the cap.
+    const capped = new ObjectPool({ create: () => ({}), size: 4, maxSize: 10 });
+    check(capped.size <= 10, () => `T0: size <= maxSize breached at rest: size=${capped.size} maxSize=10`);
+    for (let i = 0; i < 20; i++) capped.acquire();
+    check(capped.size <= 10, () => `T0: size grew past maxSize during expansion: size=${capped.size} maxSize=10`);
 }

@@ -13,11 +13,11 @@ export interface ObjectPoolOptions<T> {
     create: () => T;
     /** Called on release to clean an object for reuse. Default: no-op */
     reset?: (obj: T) => void;
-    /** Initial pool size (preallocated). Default: 32 */
+    /** Initial pool size (preallocated). A finite integer >= 0. Default: 32 */
     size?: number;
-    /** Auto-expand when exhausted. Default: true */
+    /** Auto-expand when exhausted. A strict boolean. Default: true */
     expand?: boolean;
-    /** Ceiling on auto-expansion. Not a cap on `size` in 1.0.3; see README. Default: Infinity */
+    /** Ceiling on expansion. A finite integer >= 0 or Infinity, and must be >= `size`. Default: Infinity */
     maxSize?: number;
 }
 
@@ -33,7 +33,16 @@ export class ObjectPool<T = any> {
      * Create a new object pool.
      * Preallocates `size` objects immediately using the `create` callback.
      *
+     * Every option is validated before any object is created. On a bad option
+     * the constructor throws before calling `create`, so a rejected `maxSize`
+     * or `size` never leaves half-built objects behind.
+     *
      * @throws {TypeError} If `create` is not a function.
+     * @throws {TypeError} If `reset` is provided and is not a function.
+     * @throws {TypeError} If `size` is not a finite integer >= 0.
+     * @throws {TypeError} If `maxSize` is not a finite integer >= 0 or Infinity.
+     * @throws {TypeError} If `expand` is provided and is not a boolean.
+     * @throws {TypeError} If `maxSize` is less than `size`.
      */
     constructor(options: ObjectPoolOptions<T>);
 
