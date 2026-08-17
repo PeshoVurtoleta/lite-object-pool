@@ -1,0 +1,110 @@
+{
+  "protocol": 3,
+  "provenance": {
+    "date": "2026-08-17T21:02:44.389Z",
+    "objectPoolVersion": "2.3.0",
+    "v1FixtureVersion": "1.1.0",
+    "node": "v26.3.1",
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "cores": 12,
+    "totalMemGB": 24,
+    "gc": true
+  },
+  "sections": {
+    "instrument": {
+      "escapeBytes": 39.944,
+      "droppedBytes": 0
+    },
+    "throughput": {
+      "v2": {
+        "label": "v2 acquire+release pair",
+        "iterations": 2000000,
+        "reps": 7,
+        "medianOpsPerSec": 94679598.32180412,
+        "nsPerOp": 10.561937499999999,
+        "iqrPct": 10.749215550541873,
+        "spreadFlag": false
+      },
+      "v1": {
+        "label": "v1 acquire+release pair",
+        "iterations": 2000000,
+        "reps": 7,
+        "medianOpsPerSec": 24045409.563597575,
+        "nsPerOp": 41.5879795,
+        "iqrPct": 0.8298604391239051,
+        "spreadFlag": false
+      },
+      "naive": {
+        "label": "naive alloc (no pool)",
+        "iterations": 2000000,
+        "reps": 7,
+        "medianOpsPerSec": 214242682.11270708,
+        "nsPerOp": 4.667604,
+        "iqrPct": 2.2800897582415747,
+        "spreadFlag": false
+      }
+    },
+    "headline": {
+      "drainN": 20000,
+      "claimBytes": 1321024,
+      "v1RawDrain": {
+        "median": 1311320,
+        "iqrPct": 0.1387914467864442,
+        "samples": [
+          1311272,
+          1311320,
+          1311320,
+          1311320,
+          1311336,
+          1314944,
+          1325456
+        ]
+      },
+      "v2RawDrain": {
+        "median": 240,
+        "iqrPct": 375,
+        "samples": [
+          240,
+          240,
+          240,
+          240,
+          240,
+          2040,
+          5376
+        ]
+      },
+      "v1PerAcquire": 65.566,
+      "v2PerAcquire": 0.012,
+      "claimDevPct": 0.7345816578654135,
+      "v1DrainNetBytesPerAcquire": 60.368,
+      "v2DrainNetBytesPerAcquire": 0,
+      "drainWindowValid": true,
+      "confirmedV1": true,
+      "confirmedV2": true,
+      "confirmed": true,
+      "resolution": "CONFIRMED: both halves (\"1,321,024 B\" and \"-> 0\") reproduce; no correction needed."
+    },
+    "naive": {
+      "retainedBytesPerOp": 45.2,
+      "droppedBytesPerOp": 0
+    },
+    "shapes": {
+      "smallBytes": 0,
+      "largeBytes": 0,
+      "smallNs": 17.51775,
+      "largeNs": 19.5345205,
+      "nsDeltaPct": 11.512725663969402
+    },
+    "arrayBuffers": {
+      "verdict": "pass",
+      "growthBytes": 0,
+      "major": 0,
+      "visitFloor": 819200,
+      "visits": 860160,
+      "visitsOk": true
+    }
+  },
+  "generated": "2026-08-17T21:02:44.389Z"
+}

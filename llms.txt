@@ -1,4 +1,4 @@
-# @zakkster/lite-object-pool v2.2.0
+# @zakkster/lite-object-pool v2.3.0
 
 > Zero-dependency object pool for games, particles, and high-frequency object churn. Zero allocation on the hot path.
 

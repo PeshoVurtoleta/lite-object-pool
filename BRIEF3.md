@@ -38,11 +38,24 @@ TASKS
     bench author to cite `probe/poly.mjs`. The measured figure is 0.0055 and it
     lives at `decisions/D1-structure.md:119`; the string "0.0022" appears
     nowhere in the repo. Cite the decision record, not the probe.]
-  - The v1 comparison needs a v1 implementation to bench against. One already
-    exists in-repo: T5's differential fuzz carries a v1 Set-based oracle. Reuse
-    it rather than re-deriving one or pulling 1.1.0 off npm at bench time, and
-    assert it is the same oracle T5 runs -- two divergent "v1"s would make the
-    headline comparison unfalsifiable.
+  - The v1 comparison needs a v1 implementation to bench against, and there is
+    NO reusable one in the repo. Recover it: `git show d3a13ad:ObjectPool.js`
+    (VERSION '1.1.0', Set-based, verified) and freeze it verbatim as
+    `test/baseline/ObjectPool-1.1.0.js`, alongside the ObjectPool-2.0.0.js
+    baseline that already lives there. Then drive that ONE fixture from BOTH
+    the bench and T5, and assert both use it -- two divergent "v1"s would make
+    the headline comparison unfalsifiable.
+    [CORRECTED 2026-08-17. This brief said "One already exists in-repo: T5's
+    differential fuzz carries a v1 Set-based oracle. Reuse it rather than
+    re-deriving one." That is FALSE and the task built on it was unrunnable.
+    T5's "oracle" is `const active = new Set()` at `test/torture/t5-fuzz.mjs:43`
+    -- shadow bookkeeping that mirrors what the pool did so used/free/identity
+    can be cross-checked. It is not an ObjectPool, has no acquire/release, and
+    cannot be benchmarked. Its own comment says "Oracle: v1-style", which is
+    what this brief misread as "is v1". Also struck: "pulling 1.1.0 off npm" --
+    recover from the local commit, not the network, so the fixture is pinned.
+    And note there is no `1.1.0` git TAG; only v2.0.0 and v2.1.0 are tagged.
+    The commit `d3a13ad` is the source.]
   - Verify `maxArrayBuffersGrowth: 0` with `stabilize: 'deep'` across the FULL
     bench workload, not just the torture body.
   - Demo per suite convention: oscilloscope phosphor-green, oklch tokens with
@@ -55,9 +68,17 @@ TASKS
         acquire-site tagging, a deliberate never-released cohort, and
         `createPoolLeakKernel().audit()` naming the offending call site live.
         This is the debug lane earning its keep. Show the cost honestly next to
-        it -- the measured net is ~97 B/acquire with `captureStacks` off and
-        ~1.4 KB with it on, so the scene must also demonstrate that the debug
-        lane is NOT the shipping hot path.
+        it. Cite the SHIPPED figures -- `llms.txt:87-89`, ~102 B/acquire with
+        `captureStacks` off and ~1173 B (~1.2 KB) with it on -- so the demo,
+        the docs and the package agree. The scene must also demonstrate that
+        the debug lane is NOT the shipping hot path.
+        [An independent QA re-measure during the 2.2.0 session read net 97 B
+        off and net 1385 B on. The 97-vs-102 gap is noise; the 1385-vs-1173 gap
+        is real and expected, because stack capture cost scales with call
+        depth and the re-measure ran from a deeper site. Quote llms.txt as
+        canonical and say the on-figure is depth-dependent. Do NOT quote the
+        one-off 97/1.4 KB pair -- an earlier revision of this brief did, which
+        would have put the demo in conflict with the shipped llms.txt.]
         [CORRECTED 2026-08-17. This brief asked for a "live watchPool
         pool-escape canary scene wired to lite-gc-profiler", and said that if
         the canary could not be driven from the demo then `stats()` was shaped
@@ -97,6 +118,18 @@ ASSERTIONS
     if it turns out to be noise at bench scale.
   - Demo runs 60fps with zero major GCs over 60 seconds under the profiler.
   - `npm pack --dry-run` excludes demo/, bench/, test/, decisions/, probe/.
+    State the count UNAMBIGUOUSLY, both numbers, because these two disagree by
+    design and conflating them already cost this package once: `files[]` holds
+    8 ENTRIES, and `npm pack` reports `total files: 9` -- npm always adds
+    `package.json`, which is not listed in `files[]`. 8 and 9 are both correct
+    for their own question. Assert the pack total is 9 and that `files[]` has
+    8 entries; never assert one number against the other measurement.
+    [The 2.2.0 session shipped an untyped `./debug` export because a brief
+    asserted "exactly 8 files" and the coder dropped `ObjectPoolDebug.d.ts` to
+    hit it, causing TS7016 for consumers. Nothing in the suite tested the
+    count -- it existed only as brief prose. If a count and a correct product
+    ever collide again, flag the collision; do not degrade the product to
+    satisfy a number in a brief.]
   - torture "ok"; all tier controls exit non-zero.
 
 NON-GOALS

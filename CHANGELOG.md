@@ -9,6 +9,132 @@ Version is synced in three places from 1.0.3 forward: `package.json`, the
 `VERSION` const exported from `ObjectPool.js`, and the header line of
 `llms.txt`.
 
+## [2.3.0] -- 2026-08-18
+
+Session P4. Every number this package advertises becomes STAMPED and re-runnable,
+and the "no GC pauses in your 60fps loop" claim gets something a reader can watch.
+COLD-PATH ONLY: `ObjectPool.js` and `ObjectPoolDebug.js` are BYTE-IDENTICAL to
+2.2.0 apart from the `VERSION` const -- the four pinned hot-body hashes (`acquire`
+55f3a646dd5e9a57, `release` 239ef75c603bf839, `releaseAll` b29b13b9996ffd34,
+`forEachActive` 937941616f65fd72) did not move. This release adds `bench/`,
+`demo/`, one frozen test fixture, a third T5 lane, and an `npm run bench` script.
+`bench/` and `demo/` are in NEITHER `files[]` (8 entries) nor the pack (`npm pack`
+reports `total files: 9` -- npm always adds `package.json`).
+
+SCOPE NOTE: 2.3.0 was planned as two phases -- P4 (bench + demo, BRIEF3) and P5
+(release train + README rebuild, BRIEF4). Only P4 shipped here. The README is
+still on the pre-blueprint spine and the v1 -> v2 migration section still lists
+four breaking changes rather than the ten the 2.0.0 entry actually records.
+BRIEF4 is unrun and moves to the next release.
+
+### The headline resolution -- DIRECTION: CONFIRMED
+
+The 2.0.0 CHANGELOG claims `1,321,024 bytes -> 0` on a 20,000-object drain. The
+bench reproduces BOTH halves on the SAME drain shape (node v26.3.1, darwin/arm64,
+Apple M4 Pro), so the CHANGELOG stands unchanged -- no number was corrected:
+
+- **v1 half** (the `1,321,024 B`): the frozen v1 fixture, gc-anchored drain of a
+  never-drained 20,000 pool, retains ~1.31 MB (~66 B/acquire) -- a noisy heapUsed
+  delta, so the exact bytes vary run to run (`sections.headline.v1RawDrain.median`
+  / `v1PerAcquire`). Its median deviates well under 1% from the claimed figure
+  (`sections.headline.claimDevPct`; ~0.7% on the stamped run), inside the 15%
+  noise band (`IQR_FLAG_PCT`, the suite's one definition of noise, reused from
+  `LiteRouter/bench/bench.js`).
+- **v2 half** (the `-> 0`): certified by the netted `heap.allocBytes`
+  discrimination instrument (NET_OPS=1000 window, min-over-8) over the SAME drain
+  shape -- v2's drain-acquire nets **0.0000 B/op**, while the v1 fixture's
+  drain-acquire on that identical window reads **60.368 B/op** (stamped:
+  `bench-results.json` -> `sections.headline.v1DrainNetBytesPerAcquire`, stable to
+  four decimals across repeated runs). That non-zero v1 figure is the POSITIVE
+  CONTROL proving the drain window is not blind. The raw heapUsed drain delta for
+  v2 (~240 B, IQR ~375%; `sections.headline.v2RawDrain`) is ambient-noise-limited
+  and is reported as such, NOT as the certified zero.
+
+The verdict tests both halves; forcing EITHER the v2 raw drain OR the v2
+drain-instrument non-zero flips `resolution` to DISAGREES (watched to fail before
+this was trusted). The bench is not tuned to agree -- a stamped number is allowed
+to disagree, and if it did the correction would land here, not in the bench.
+
+### Added
+
+- **`bench/torture.js`** (`npm run bench`, protocol v3, stamped provenance: node /
+  OS / arch / CPU / cores / memory / date / package + fixture version). Puts three
+  implementations side by side -- the shipped v2 sparse-set pool, the frozen v1
+  Set-based fixture, and a genuinely-naive per-acquire allocation into a RETAINED
+  sink -- and reports ns/op AND bytes/op. The bytes number is the interesting one
+  and the one v1 loses on. Lanes: instrument validation (a retained control that
+  MUST read non-zero, next to the same allocation DROPPED, which V8
+  scalar-replaces to 0.0000 -- the trap that read the first T6 positive control as
+  a false zero); throughput; the headline; the naive baseline (asserted non-zero,
+  because a baseline that optimises to zero measures nothing); two object shapes;
+  and a full-workload `maxArrayBuffersGrowth: 0` gate with `stabilize: 'deep'`.
+- **`test/baseline/ObjectPool-1.1.0.js`** -- the v1 Set-based pool frozen verbatim
+  from commit `d3a13ad` (VERSION `1.1.0`, 202 lines), beside the existing
+  `ObjectPool-2.0.0.js`. There is no `1.1.0` git TAG (only v2.0.0 / v2.1.0 are
+  tagged); the commit is the source. This ONE fixture is driven by BOTH the bench
+  and T5, and both assert they loaded it (VERSION + pinned path) -- two divergent
+  "v1"s would make the headline comparison unfalsifiable.
+- **T5 third lane.** `t5-fuzz.mjs` now drives the frozen v1 fixture through the
+  same 100k-op stream as v2, compared on `used` / `free` / `size` ONLY. Identities
+  legitimately diverge (v1's free-list LIFO order != v2's cursor order, D2), so
+  identity is deliberately NOT compared across it; the COUNTS must agree op-for-op.
+- **`demo/index.html`** -- oscilloscope phosphor-green, oklch tokens with hex
+  declared first, `@media (hover: hover)`, rem sizing, `$`-prefixed cached DOM
+  refs, importmap routing, pre-allocated `Float32Array` ring buffers, ~10 Hz
+  telemetry throttle, `data-scene` tabs. Three scenes: a particle BURST (the OP-01
+  spike workload, live, at 0 B/op), a CHURN firehose (steady 1:1 at capacity with
+  a frame-time trace), and a LEAK-HUNT on the `/debug` subpath -- a
+  `DebugObjectPool` with `captureStacks` on and `createPoolLeakKernel().audit()`
+  naming each acquired-never-released object's call site live. `stats(out)` drives
+  all telemetry into ONE long-lived scratch object at 0 B/op. `watchPool` is used
+  NOWHERE: `_items[]` retains every pooled object, so a pool escape is impossible
+  by construction and the canary would read zero forever (D6.9).
+
+### Changed
+
+- Version synced in the three canonical places (`package.json`, the `VERSION`
+  const in `ObjectPool.js`, the `llms.txt` header) plus the two sites the suite
+  law does not name: the `VERSION` assertion in `test/ObjectPool.test.js` and the
+  demo's `<h1>` version badge. Historical `since 2.2.0` / `What 2.2.0 changed`
+  references in `README.md`, `llms.txt`, `ObjectPool.d.ts`, `ObjectPool.js` and
+  `decisions/` are provenance, not version sites, and were left alone.
+- `test/torture/harness.mjs` and the T5 tier now carry the third differential
+  lane; `ALL_ARMABLE_TIERS` is unchanged at ten.
+
+### Fixed
+
+- **The demo's `audit (kernel.count / audit)` button did nothing.** Every
+  mutating handler (`spawnEnemy`, `spawnPickup`, release-all) already called
+  `renderAudit()` on click, so the findings list was always current by the time
+  the audit button was pressed -- it could not produce a visible change in any
+  reachable state, and the scene's own copy ("...NEVER release them, then
+  audit") described a two-step flow the wiring short-circuited. Spawning and
+  releasing now move only the O(1) counters and leave the NAMES stale; the audit
+  button performs the stack walk and populates the list. That split is also the
+  point the scene teaches: counts are cheap, names cost a stack walk. Found by
+  clicking the button in a browser -- every automated check passed, including a
+  node-side probe that called `audit()` directly and so never exercised the
+  handler wiring at all.
+
+### Removed
+
+- Nothing.
+
+### Design notes
+
+- **Two object shapes, unconditionally.** The roadmap made this conditional on
+  "IF the OP-17 probe showed polymorphism costs". It ran during P2a and DID: the
+  mixed symbol+WeakMap slot-reader lane measured 0.0055 B/op
+  (`decisions/D1-structure.md:119`), the only lane that did not net zero, which
+  killed the fallback and forced WeakMap-only. The condition is satisfied, so the
+  bench benches both shapes and reports the polymorphic delta (both net zero: v2
+  has one release shape).
+- **The debug lane's cost is quoted from `llms.txt`, canonically:** ~102 B/acquire
+  with `captureStacks` off, ~1173 B (~1.2 KB) with it on (depth-dependent). The
+  leak-hunt scene shows the cost honestly next to the signal and demonstrates the
+  debug lane is NOT the shipping hot path -- the burst and churn scenes use the
+  plain `ObjectPool` at 0 B/op.
+
 ## [2.2.0] -- 2026-08-17
 
 Session P3. Make the pool OBSERVABLE without making it allocate. Recorded in

@@ -1,7 +1,7 @@
 {
   "name": "@zakkster/lite-object-pool",
   "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Tiny, fast, zero-dependency object pool with O(1) acquire/release, double-release protection, and auto-expansion for games and particle systems.",
   "type": "module",
   "main": "./ObjectPool.js",
@@ -33,6 +33,7 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
+    "bench": "node --expose-gc bench/torture.js",
     "torture": "node --expose-gc test/torture.mjs",
     "torture:controls": "node test/controls.mjs",
     "verify": "npm test && npm run torture && npm run torture:controls"

@@ -60,7 +60,7 @@ const EMPTY_U32 = new Uint32Array(0);
 const GROW_CHUNK = 256;
 
 /** Package version. Kept in sync with package.json and llms.txt. */
-export const VERSION = '2.2.0';
+export const VERSION = '2.3.0';
 
 /** The only option keys this version recognizes. Anything else is rejected at
  *  construction (fail closed on an unverified state). The 2.1.0 canonical triple
