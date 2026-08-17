@@ -9,9 +9,9 @@
  * Tiers wired in P0 (this session builds the INSTRUMENT; it fixes no bugs):
  *
  *     T0  metamorphic laws              T1  degenerate constructor options
- *     T3  adversarial churn             T4  identity / lifecycle abuse
- *     T6  the allocation gate           T7  soak + leak witness
- *     T9  controls (must be able to fail)
+ *     T2  differential speed (P2b)      T3  adversarial churn
+ *     T4  identity / lifecycle abuse    T6  the allocation gate
+ *     T7  soak + leak witness           T9  controls (must be able to fail)
  *
  * T5 (differential fuzz vs oracle) is a registered empty tier filled in P2.
  * T8 (cross-package poison door) is a registered empty tier filled in P3.
@@ -33,9 +33,10 @@
  * @license MIT
  */
 
-import { SEED, BREAK } from './torture/harness.mjs';
+import { SEED, BREAK, BACKSTOP_MESSAGE } from './torture/harness.mjs';
 import { run as t0 } from './torture/t0-laws.mjs';
 import { run as t1 } from './torture/t1-degenerate.mjs';
+import { run as t2 } from './torture/t2-speed.mjs';
 import { run as t3 } from './torture/t3-adversarial.mjs';
 import { run as t4 } from './torture/t4-identity.mjs';
 import { run as t5 } from './torture/t5-fuzz.mjs';
@@ -47,6 +48,7 @@ import { run as t9 } from './torture/t9-controls.mjs';
 const TIERS = [
     ['T0 laws', t0],
     ['T1 degenerate', t1],
+    ['T2 speed', t2],
     ['T3 adversarial', t3],
     ['T4 identity', t4],
     ['T5 fuzz', t5],       // empty until P2
@@ -83,10 +85,13 @@ function main() {
         }
     }
 
-    // Reaching here in BREAK mode means no control tripped -- a fault.
+    // Reaching here in BREAK mode means no control tripped. For a CONTROL-OWNING
+    // tier that is a fault (its control failed to fire). For a non-owning tier
+    // (T1/T3/T4/T5/T9, which own no injectable control by design) this backstop
+    // IS the expected outcome -- arming a tier with no control must still fail
+    // safe. Either way: exit non-zero, never a silent "ok".
     if (BREAK) {
-        process.stderr.write(
-            'torture: FAIL -- OBJECTPOOL_TORTURE_BREAK set but every control still passed\n');
+        process.stderr.write('torture: FAIL -- ' + BACKSTOP_MESSAGE + '\n');
         process.exit(1);
     }
 

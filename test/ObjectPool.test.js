@@ -1,6 +1,14 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { ObjectPool, VERSION } from '../ObjectPool.js';
+import { ObjectPool as FrozenPool } from './baseline/ObjectPool-2.0.0.js';
+
+/** Absolute path to a repo file, resolved from this test's URL (no cwd, no git). */
+const repoPath = (rel) => fileURLToPath(new URL('../' + rel, import.meta.url));
+const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
 /**
  * Hand-rolled call recorder -- replaces vitest's vi.fn().
@@ -94,8 +102,8 @@ describe('ObjectPool', () => {
             assert.notStrictEqual(second, null);
         });
 
-        test('VERSION is exported and is 2.0.0', () => {
-            assert.strictEqual(VERSION, '2.0.0');
+        test('VERSION is exported and is 2.1.0', () => {
+            assert.strictEqual(VERSION, '2.1.0');
         });
     });
 
@@ -170,19 +178,23 @@ describe('ObjectPool', () => {
             }
         });
 
-        test('the three reserved future names throw a 2.1.0-specific message', () => {
-            for (const key of ['capacity', 'prealloc', 'onExhausted']) {
-                let err = null;
-                try { new ObjectPool({ create: () => ({}), [key]: 1 }); } catch (e) { err = e; }
-                assert.ok(err instanceof TypeError, `${key} did not throw`);
-                assert.match(err.message, new RegExp(`^ObjectPool: "${key}"`), `${key} not named`);
-                assert.match(err.message, /2\.1\.0/, `${key} did not mention 2.1.0: ${err.message}`);
-            }
+        test('the three canonical names are real options now, not reserved (2.1.0)', () => {
+            // In 2.0.0 these threw a "coming in 2.1.0" message. In 2.1.0 they are
+            // the canonical vocabulary and must construct a valid pool.
+            assert.doesNotThrow(() => new ObjectPool({ create: () => ({}), capacity: 8, prealloc: 4, onExhausted: 'grow' }));
+            const p = new ObjectPool({ create: () => ({}), capacity: 8, prealloc: 4, onExhausted: 'grow' });
+            assert.strictEqual(p.size, 4);
         });
 
-        test('a full valid options object with all five keys constructs', () => {
+        test('a full valid options object with all five legacy keys constructs', () => {
             assert.doesNotThrow(() => new ObjectPool({
                 create: () => ({}), reset: () => {}, size: 4, expand: true, maxSize: 10,
+            }));
+        });
+
+        test('a full valid options object with the canonical triple constructs', () => {
+            assert.doesNotThrow(() => new ObjectPool({
+                create: () => ({}), reset: () => {}, capacity: 10, prealloc: 4, onExhausted: 'grow',
             }));
         });
 
@@ -387,6 +399,245 @@ describe('ObjectPool', () => {
                 );
             });
         });
+    });
+
+    // ---------------------------------------------------------------
+    //  The 2.1.0 option reshape (D5) -- capacity / prealloc / onExhausted
+    // ---------------------------------------------------------------
+
+    describe('2.1.0 option reshape (D5)', () => {
+        const cr = () => ({});
+
+        /** Drive a deterministic 100-op acquire/release program and record the
+         *  {size, used, free} triple after every op, so two pools built from
+         *  different vocabularies can be proven observationally identical -- not
+         *  merely "both constructed". */
+        function trace(pool) {
+            const held = [];
+            const log = [];
+            for (let i = 0; i < 100; i++) {
+                if (i % 3 === 2 && held.length) {
+                    pool.release(held.pop());
+                } else {
+                    const o = pool.acquire();
+                    if (o) held.push(o);
+                }
+                log.push(pool.size + ',' + pool.used + ',' + pool.free);
+            }
+            return log.join('|');
+        }
+
+        describe('alias equivalence -- every legacy config equals its canonical twin', () => {
+            // Both directions: legacy spelling and canonical spelling must build a
+            // pool that is IDENTICAL over 100 acquire/release ops (size/used/free).
+            const pairs = [
+                ['defaults', { create: cr }, { create: cr }],
+                ['fixed, no expand',
+                    { create: cr, size: 4, expand: false },
+                    { create: cr, prealloc: 4, onExhausted: 'null' }],
+                ['bounded growth',
+                    { create: cr, size: 4, expand: true, maxSize: 50 },
+                    { create: cr, prealloc: 4, onExhausted: 'grow', capacity: 50 }],
+                ['eager to capacity',
+                    { create: cr, size: 8, expand: false, maxSize: 8 },
+                    { create: cr, prealloc: 'eager', capacity: 8, onExhausted: 'null' }],
+                ['lazy start, grows',
+                    { create: cr, size: 0, expand: true },
+                    { create: cr, prealloc: 'lazy', onExhausted: 'grow' }],
+            ];
+            for (const [label, legacy, canon] of pairs) {
+                test(`${label}: legacy and canonical produce identical {size,used,free} over 100 ops`, () => {
+                    const a = trace(new ObjectPool(legacy));
+                    const b = trace(new ObjectPool(canon));
+                    assert.strictEqual(a, b, `${label}: traces diverged\nlegacy=${a}\ncanon =${b}`);
+                });
+            }
+
+            test('the README/llms default equals new ObjectPool({create}) both ways', () => {
+                const legacy = new ObjectPool({ create: cr, size: 32, expand: true, maxSize: Infinity });
+                const canon = new ObjectPool({ create: cr, prealloc: 32, onExhausted: 'grow', capacity: Infinity });
+                const bare = new ObjectPool({ create: cr });
+                assert.strictEqual(legacy.size, 32);
+                assert.strictEqual(canon.size, 32);
+                assert.strictEqual(bare.size, 32);
+            });
+        });
+
+        describe('the two vocabularies are mutually exclusive -- three conflict throws', () => {
+            const conflicts = [
+                ['{size, capacity}', { create: cr, size: 8, capacity: 16 }, ['size', 'capacity']],
+                ['{expand, onExhausted}', { create: cr, expand: false, onExhausted: 'grow' }, ['expand', 'onExhausted']],
+                ['{maxSize, prealloc}', { create: cr, maxSize: 10, prealloc: 4 }, ['maxSize', 'prealloc']],
+            ];
+            for (const [label, opts, [legacyKey, canonKey]] of conflicts) {
+                test(`${label} throws by name (both keys)`, () => {
+                    let err = null;
+                    try { new ObjectPool(opts); } catch (e) { err = e; }
+                    assert.ok(err instanceof TypeError, `${label} did not throw a TypeError`);
+                    assert.match(err.message, new RegExp(`"${legacyKey}"`), `${label} did not name ${legacyKey}`);
+                    assert.match(err.message, new RegExp(`"${canonKey}"`), `${label} did not name ${canonKey}`);
+                });
+            }
+
+            test('an explicit undefined canonical key is not a conflict with a legacy key', () => {
+                assert.doesNotThrow(() => new ObjectPool({ create: cr, size: 8, capacity: undefined }));
+            });
+        });
+
+        describe('prealloc: "eager" requires a finite capacity', () => {
+            test('{prealloc:"eager", capacity:Infinity} throws by name', () => {
+                let err = null;
+                try { new ObjectPool({ create: cr, prealloc: 'eager', capacity: Infinity }); } catch (e) { err = e; }
+                assert.ok(err instanceof TypeError, 'did not throw');
+                assert.match(err.message, /^ObjectPool: "prealloc"/);
+                assert.match(err.message, /capacity/);
+            });
+
+            test('{prealloc:"eager"} with the default (Infinity) capacity throws by name', () => {
+                assert.throws(
+                    () => new ObjectPool({ create: cr, prealloc: 'eager' }),
+                    (err) => err instanceof TypeError && /^ObjectPool: "prealloc"/.test(err.message),
+                );
+            });
+
+            test('{prealloc:"eager", capacity:N} builds exactly N', () => {
+                const p = new ObjectPool({ create: cr, prealloc: 'eager', capacity: 12 });
+                assert.strictEqual(p.size, 12);
+                assert.strictEqual(p.free, 12);
+            });
+        });
+
+        describe('canonical validation', () => {
+            test('onExhausted must be one of the three strings', () => {
+                for (const bad of ['nope', 'GROW', true, 1, null]) {
+                    assert.throws(
+                        () => new ObjectPool({ create: cr, onExhausted: bad }),
+                        (err) => err instanceof TypeError && /^ObjectPool: "onExhausted"/.test(err.message),
+                        `onExhausted:${String(bad)} did not throw`,
+                    );
+                }
+            });
+
+            test('prealloc must be a finite integer >= 0, "eager", or "lazy"', () => {
+                for (const bad of [-1, 2.5, NaN, '4', 'huge']) {
+                    assert.throws(
+                        () => new ObjectPool({ create: cr, prealloc: bad }),
+                        (err) => err instanceof TypeError && /^ObjectPool: "prealloc"/.test(err.message),
+                        `prealloc:${String(bad)} did not throw`,
+                    );
+                }
+            });
+
+            test('capacity must be a finite integer >= 0 or Infinity', () => {
+                for (const bad of [-1, 2.5, NaN, '4']) {
+                    assert.throws(
+                        () => new ObjectPool({ create: cr, capacity: bad, prealloc: 0 }),
+                        (err) => err instanceof TypeError && /^ObjectPool: "capacity"/.test(err.message),
+                        `capacity:${String(bad)} did not throw`,
+                    );
+                }
+            });
+
+            test('{capacity < prealloc} throws naming both', () => {
+                let err = null;
+                try { new ObjectPool({ create: cr, capacity: 2, prealloc: 5 }); } catch (e) { err = e; }
+                assert.ok(err instanceof TypeError);
+                assert.match(err.message, /"capacity"/);
+                assert.match(err.message, /"prealloc"/);
+            });
+
+            test('a typo near a canonical name gets a did-you-mean hint', () => {
+                let err = null;
+                try { new ObjectPool({ create: cr, capasity: 4 }); } catch (e) { err = e; }
+                assert.ok(err instanceof TypeError);
+                assert.match(err.message, /did you mean "capacity"/);
+            });
+        });
+
+        describe('onExhausted: "throw" disambiguates OP-04, "null" still conflates', () => {
+            test('"throw" capped case names the capacity', () => {
+                const p = new ObjectPool({ create: cr, capacity: 2, prealloc: 'eager', onExhausted: 'throw' });
+                p.acquire(); p.acquire();
+                assert.throws(() => p.acquire(), /exceeded capacity 2/);
+            });
+
+            test('"throw" exhausted-below-capacity case is a distinct message', () => {
+                const p = new ObjectPool({ create: cr, capacity: 10, prealloc: 3, onExhausted: 'throw' });
+                p.acquire(); p.acquire(); p.acquire();
+                assert.throws(() => p.acquire(), /exhausted pool of 3/);
+            });
+
+            test('"null" still returns null for both capped and exhausted (OP-04 remainder)', () => {
+                const capped = new ObjectPool({ create: cr, capacity: 2, prealloc: 'eager', onExhausted: 'null' });
+                capped.acquire(); capped.acquire();
+                assert.strictEqual(capped.acquire(), null);
+                const exhausted = new ObjectPool({ create: cr, capacity: 10, prealloc: 3, onExhausted: 'null' });
+                exhausted.acquire(); exhausted.acquire(); exhausted.acquire();
+                assert.strictEqual(exhausted.acquire(), null);
+            });
+
+            test('KNOWN LIMIT (D5): "throw" does not grow, so capacity>prealloc is inert', () => {
+                // Documented in D5 / llms.txt / README: "grow to a hard cap then
+                // throw" is not expressible; "throw" throws at prealloc, not at
+                // capacity. This is a scope CHOICE (onExhausted is one axis), NOT
+                // forced by additivity -- "throw" has no legacy alias (expand folds
+                // only to grow/null). "throw" has NO legacy twin; do not compare it
+                // to expand:false (that is "null"'s twin). Pinned so the documented
+                // limit cannot silently change.
+                const p = new ObjectPool({ create: cr, capacity: 4096, prealloc: 32, onExhausted: 'throw' });
+                for (let i = 0; i < 32; i++) assert.notStrictEqual(p.acquire(), null);
+                assert.strictEqual(p.size, 32); // never grew toward 4096
+                assert.throws(() => p.acquire(), /exhausted pool of 32/); // NOT "exceeded capacity"
+            });
+        });
+    });
+
+    // ---------------------------------------------------------------
+    //  Hot-body byte-identity and shipped-file hygiene (P2b)
+    // ---------------------------------------------------------------
+
+    describe('hot bodies are byte-identical to the 2.0.0 fixture', () => {
+        // Captured from HEAD (git c5a3dd9 = 2.0.0) before any P2b edit and
+        // re-verified against HEAD. Any change to a hot body -- whitespace
+        // included -- changes its .toString() hash and fails a named test here.
+        const HOT_HASHES = {
+            acquire: '55f3a646dd5e9a5700609d82fedc88077dffabb434749776790f4ccc48800de0',
+            release: '239ef75c603bf839d2f0df7089651955f8342e5df7bbc89a05e2b23eeeeb8e7a',
+            releaseAll: 'b29b13b9996ffd342a3e45bf42b370c83ede18676e19a08d91d882715d7905b9',
+            forEachActive: '937941616f65fd728957e65031092991fe34ed3fbfe2990567c994cbffc5550c',
+        };
+
+        for (const method of Object.keys(HOT_HASHES)) {
+            test(`shipped ${method}() matches the 2.0.0 hash`, () => {
+                assert.strictEqual(sha256(ObjectPool.prototype[method].toString()), HOT_HASHES[method]);
+            });
+            test(`frozen baseline ${method}() matches the 2.0.0 hash`, () => {
+                assert.strictEqual(sha256(FrozenPool.prototype[method].toString()), HOT_HASHES[method]);
+            });
+        }
+
+        test('the frozen baseline file has not drifted (own-integrity hash)', () => {
+            // Guards the frozen copy itself: a well-meaning "fix" to
+            // test/baseline/ObjectPool-2.0.0.js changes this hash and fails loudly.
+            const raw = readFileSync(repoPath('test/baseline/ObjectPool-2.0.0.js'));
+            assert.strictEqual(sha256(raw), '727d51967a6ce5be1e260fbc516e31107d1ed8e884036bc5256f21cc7aed5707');
+        });
+    });
+
+    describe('no stale forward-reference survives in shipped files', () => {
+        // The 2.0.0 FUTURE_KEYS messages said capacity/prealloc/onExhausted were
+        // "coming in 2.1.0" / "reserved". Shipping either string IN 2.1.0 is the
+        // exact rot this test forbids. Grep the files package.json actually ships.
+        const SHIPPED = ['ObjectPool.js', 'ObjectPool.d.ts', 'llms.txt', 'README.md'];
+        const FORBIDDEN = [/coming in 2\.1\.0/i, /\breserved\b/i];
+        for (const file of SHIPPED) {
+            test(`${file} carries no "coming in 2.1.0" / "reserved" string`, () => {
+                const text = readFileSync(repoPath(file), 'utf8');
+                for (const pat of FORBIDDEN) {
+                    assert.ok(!pat.test(text), `${file} still matches ${pat}`);
+                }
+            });
+        }
     });
 
     // ---------------------------------------------------------------

@@ -77,19 +77,45 @@ particles.releaseAll();
 
 ### `new ObjectPool(options)`
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `create` | `() => T` | *required* | Factory function that returns a new object |
-| `reset` | `(obj: T) => void` | no-op | Called on release to clean an object for reuse |
-| `size` | `number` | `32` | Initial pool size (preallocated) |
-| `expand` | `boolean` | `true` | Auto-create objects when pool is exhausted. Strict boolean -- `0`/`''`/`'false'` throw |
-| `maxSize` | `number` | `Infinity` | Ceiling on expansion. A finite integer `>= 0` or `Infinity`, and **must be `>= size`** -- a contradictory `{maxSize < size}` throws at construction (since 1.1.0) |
+Since 2.1.0 there are two spellings of the same three axes -- the canonical
+`{capacity, prealloc, onExhausted}` triple, and the permanent legacy
+`{size, expand, maxSize}` aliases:
+
+| Option | Type | Default | Legacy alias | Description |
+|--------|------|---------|--------------|-------------|
+| `create` | `() => T` | *required* | -- | Factory function that returns a new object |
+| `reset` | `(obj: T) => void` | no-op | -- | Called on release to clean an object for reuse |
+| `capacity` | `number` | `Infinity` | `maxSize` | Upper bound on total objects. A finite integer `>= 0` or `Infinity`, and **must be `>= prealloc`** |
+| `prealloc` | `number \| "eager" \| "lazy"` | `32` | `size` | How much of `capacity` to build now. `"eager"` builds all of it (needs a finite `capacity`); `"lazy"` builds none |
+| `onExhausted` | `"null" \| "grow" \| "throw"` | `"grow"` | `expand` (`true`=`"grow"`, `false`=`"null"`) | What `acquire()` does when it cannot serve: return `null`, grow a bounded chunk, or throw. `"grow"` grows then returns `null` at `capacity`; `"null"` and `"throw"` do **not** grow |
+
+> **Known limit (grow-then-throw).** `onExhausted` is a single axis, so it couples
+> growth with the terminal policy: "grow up to a hard cap, **then** throw" (the
+> leak-detection config) is not expressible. `{ capacity: 4096, prealloc: 32,
+> onExhausted: "throw" }` throws at acquire 33 and the `capacity` is inert --
+> `"exceeded capacity"` fires only when `prealloc === capacity`. This is a scope
+> **choice**, not a contradiction and **not** forced by additivity: `"throw"` is
+> new surface with no legacy alias (`expand` folds only to `"grow"`/`"null"`, so
+> `{ size: 32, expand: false, maxSize: 4096 }` is the twin of `onExhausted: "null"`,
+> not `"throw"`). grow-then-throw was implementable; it was deferred because it
+> needs a second, orthogonal axis -- a future additive change. See
+> [`decisions/D5-options.md`](./decisions/D5-options.md).
+
+The two vocabularies are **mutually exclusive**: mixing any legacy alias with any
+canonical name -- `{size, capacity}`, `{expand, onExhausted}` -- throws a
+`TypeError` naming one key from each side. The aliases are supported **forever**
+and never warned. Defaults are identical in both spellings, so
+`new ObjectPool({ create })` builds the same pool either way. `{prealloc: "eager",
+capacity: Infinity}` throws by name (it would allocate forever). `onExhausted:
+"throw"` distinguishes a capped pool (`exceeded capacity N`) from an exhausted one;
+`onExhausted: "null"` deliberately keeps returning `null` for both, for the
+game-loop caller who treats "no object this frame" as one condition.
 
 Every option is validated in the constructor. A bad value throws a `TypeError`
 whose message is prefixed `ObjectPool: "<option>"`, naming both the library and
-the offending option -- e.g. `ObjectPool: "size" must be a finite integer >= 0,
-received 2.5 (number)`. Validation is constructor-cold and adds nothing to
-`acquire()` / `release()`.
+the offending option -- e.g. `ObjectPool: "prealloc" must be a finite integer >= 0,
+"eager", or "lazy", received 2.5 (number)`. Validation is constructor-cold and adds
+nothing to `acquire()` / `release()` -- their bodies are byte-identical to 2.0.0.
 
 ### Methods
 
@@ -271,8 +297,11 @@ scoped versions do introduce breaking changes -- each with migration notes in
   throw (a genuine double-release still returns `false`); `destroy()` now drains;
   `create()` must return a distinct object each call; and expansion grows in
   bounded chunks. The option shape `{create, reset, size, expand, maxSize}` is
-  unchanged -- a capacity/prealloc reshape lands additively in `2.1.0`, so your
-  existing config keeps working.
+  unchanged.
+- **`2.1.0`** adds the canonical `{capacity, prealloc, onExhausted}` option triple.
+  It is purely **additive**: `{size, expand, maxSize}` keep working as permanent
+  aliases and every 2.0.0 config constructs an identical pool, so there is **no
+  migration** -- adopt the new spelling only if you want it.
 
 ## Ecosystem
 

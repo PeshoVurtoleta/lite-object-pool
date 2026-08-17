@@ -1,0 +1,16 @@
+{
+  "what": "Fresh 2.1.0 DIFFERENTIAL speed baseline for @zakkster/lite-object-pool.",
+  "why": "P2a shipped 2.0.0 without an absolute acquire/release ns/op baseline, so its assertOps assertion has no recorded referent. This records a differential A-vs-B baseline instead: the shipped ObjectPool.js against the frozen byte-identical 2.0.0 copy (test/baseline/ObjectPool-2.0.0.js), measured with compareOps. Because the four hot bodies are hash-identical across A and B, the true ns/op ratio is 1.0 and any deviation is pure timing noise; this file records the measured noise floor and the threshold chosen above it.",
+  "lane": "1:1 acquire+release churn at capacity on a preallocated size=4096 pool (exercises both hot bodies per op)",
+  "primitive": "compareOps(shippedFn, frozenFn, {}, { ops: 50000, warmup: 5000 })",
+  "statistic": "min over N=9 runs of max(A/B, B/A) of opsPerSec (symmetric ns/op ratio); min-over-N floors one-sided scheduling/GC jitter the same way T6 floors allocation noise",
+  "threshold": 1.15,
+  "sweep": {
+    "host": "node on darwin, 2026-08-16",
+    "single_run_max_ratio_n15": { "min": 1.003, "median": 1.040, "max": 1.110 },
+    "min_over_9_identical_6trials": [1.005, 1.009, 1.014, 1.002, 1.007, 1.003],
+    "min_over_9_identical_worst": 1.014,
+    "min_over_9_positive_control_sqrt200_6trials_best": 3.892,
+    "note": "1.15 sits ~10x above the clean min-over-9 deviation (<=1.014) and ~3.4x below the positive control (>=3.89): it rejects a real regression yet never trips on noise. A bare single-run 1.05 was inside the noise floor (single-run max reached 1.11) and would have been flaky; min-over-9 plus 1.15 is the honest gate."
+  }
+}

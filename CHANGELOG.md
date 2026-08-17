@@ -9,6 +9,73 @@ Version is synced in three places from 1.0.3 forward: `package.json`, the
 `VERSION` const exported from `ObjectPool.js`, and the header line of
 `llms.txt`.
 
+## [2.1.0] -- 2026-08-16
+
+Session P2b. The additive option reshape 2.0.0 deferred. `{size: 10, maxSize: 4}`
+became a runtime error in 1.1.0; this release makes the contradiction
+UNREPRESENTABLE on the same axis by splitting the option surface into one bound,
+one population strategy, and one exhaustion policy. Recorded in
+`decisions/D5-options.md`.
+
+### Added
+
+- **The canonical option triple `{capacity, prealloc, onExhausted}`.**
+  - `capacity` -- the single upper bound (finite integer >= 0 or Infinity, and
+    `>= prealloc`). Default `Infinity`. Legacy alias: `maxSize`.
+  - `prealloc` -- how much of `capacity` to build at construction: `"eager"` (all
+    of it, requires a finite `capacity`), `"lazy"` (none), or an integer count.
+    Default `32`. Legacy alias: `size`.
+  - `onExhausted` -- what `acquire()` does when it cannot serve: `"null"`,
+    `"grow"`, or `"throw"`. Default `"grow"`. Legacy alias: `expand`
+    (`true` = `"grow"`, `false` = `"null"`).
+- **`onExhausted: "throw"`** -- a fail-closed acquire policy with DISTINCT
+  messages for the two cases OP-04 used to conflate: `acquire() exceeded capacity
+  <N>` (hit the hard ceiling) vs `acquire() on an exhausted pool of <N> object(s)`
+  (growth off, below the ceiling). Both name `onExhausted:"throw"`.
+
+### Design notes
+
+- **Additive, non-breaking.** The legacy `{size, expand, maxSize}` spelling keeps
+  working as PERMANENT aliases -- supported forever, never deprecated, never
+  warned (a constructor `console.warn` is an allocation and a side effect this
+  library does not have). Defaults are 2.0.0-equal in both vocabularies, so
+  `new ObjectPool({ create })` builds an identical pool either way. This is an
+  explicit OVERTURN of the roadmap's D5 recommendation of an `"eager"` +
+  fail-closed default, which would have been breaking; it is the second such
+  overturn after the P2a WeakMap/OP-01 decision. See `decisions/D5-options.md`.
+- **The two vocabularies are mutually exclusive.** Mixing any legacy alias with
+  any canonical name -- `{size, capacity}`, `{expand, onExhausted}` -- throws a
+  `TypeError` naming one key from each side. Accepting both and letting one win
+  silently would reintroduce exactly the ambiguity class this reshape deletes.
+- **`{prealloc: "eager", capacity: Infinity}` throws by name** -- "build an
+  unbounded capacity now" would allocate forever; it is the 2.1.0 spelling of the
+  old OP-02 trap and fails closed at construction.
+- **The `capacity`/`prealloc`/`onExhausted` forward-reference errors are gone.**
+  2.0.0 shipped a `FUTURE_KEYS` table whose messages pointed at a then-future
+  2.1.0; the table and its branch are deleted and the three names are real options
+  now. No stale forward-reference string survives in any shipped runtime or doc
+  surface (ObjectPool.js, ObjectPool.d.ts, llms.txt, README.md) -- grep-asserted in
+  the suite. (This CHANGELOG is exempt: it is an append-only history, and the
+  2.0.0 entry below correctly records what 2.0.0 did.)
+
+### Fixed / known-failure status
+
+- **OP-04 is NARROWED, not closed.** `onExhausted: "throw"` gives callers a way to
+  tell a capped pool from an exhausted one. But `onExhausted: "null"` (and the
+  capped case under `"grow"`) STILL return `null` and STILL conflate the two --
+  deliberately, for the game-loop caller who treats "no object this frame" as a
+  single condition. So OP-04 remains open for the `"null"` policy; only the
+  `"throw"` policy disambiguates.
+- **P2a's `assertOps` speed assertion went unmet in 2.0.0** -- no absolute
+  acquire/release ns/op baseline was recorded then. 2.1.0 records a fresh
+  DIFFERENTIAL baseline instead: the T2 speed tier gates the shipped
+  `acquire`/`release` against a frozen byte-identical 2.0.0 copy
+  (`test/baseline/ObjectPool-2.0.0.js`) via `compareOps`, asserting neither side
+  is more than the measured-and-justified threshold slower than the other, both
+  directions, with a proven positive control. The four hot-body `.toString()`
+  hashes are also pinned against the 2.0.0 fixture, so any byte change to
+  `acquire`/`release`/`releaseAll`/`forEachActive` fails a named test.
+
 ## [2.0.0] -- 2026-08-15
 
 Session P2a. The headline sentence -- "no allocations during gameplay" -- is now

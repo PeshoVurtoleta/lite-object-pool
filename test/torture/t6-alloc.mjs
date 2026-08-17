@@ -59,7 +59,7 @@
 
 import { measureOps } from '@zakkster/lite-gc-profiler';
 import { ObjectPool } from '../../ObjectPool.js';
-import { runOpsGate, check, die, breaking, controlTripped } from './harness.mjs';
+import { runOpsGate, check, die, breaking, controlTripped, controlDefeated } from './harness.mjs';
 
 const CAP = 4096;         // power of two -> cheap index mask
 const STEADY_OPS = 200000;
@@ -74,7 +74,11 @@ const NET_TRIES = 8;      // min over N attempts -- the zero floor wins ~1e-6 fa
 const leak = [];
 
 /** Accumulator for the composite shape's forEachActive body, so V8 cannot
- *  dead-code-eliminate the visit. Read but otherwise inert. */
+ *  dead-code-eliminate the visit. The composite pools seed each object's `x` to
+ *  a NON-ZERO sentinel (COMPOSITE_X) and this sum is asserted after the measured
+ *  window, so "visited 4096 objects" is distinguishable from "visited 0" -- a
+ *  write-only, always-zero sink could not tell those apart. */
+const COMPOSITE_X = 1;
 let compositeSink = 0;
 const compositeVisit = (o) => { compositeSink += o.x; };
 
@@ -114,8 +118,9 @@ export function run() {
     // reached under the token -- the spike already was not). Sequential, never
     // nested (lite-gc-profiler is one-measurement-at-a-time).
     {
-        const pool = new ObjectPool({ create: () => ({ x: 0 }), size: CAP, expand: false });
+        const pool = new ObjectPool({ create: () => ({ x: COMPOSITE_X }), size: CAP, expand: false });
         const sizeBefore = pool.size;
+        compositeSink = 0;                                  // observe THIS window's visits
         const hot = () => {
             for (let j = 0; j < CAP; j++) pool.acquire();   // acquire-to-capacity
             pool.forEachActive(compositeVisit);             // over the full active set
@@ -129,10 +134,20 @@ export function run() {
             () => `T6: composite grew pool.size ${sizeBefore} -> ${pool.size}`);
         check(pool.used + pool.free === pool.size,
             () => `T6: composite broke conservation used=${pool.used} free=${pool.free} size=${pool.size}`);
+        // Non-vacuous visit proof: each of the >= SPIKE_OPS steady steps visits
+        // exactly CAP objects each contributing COMPOSITE_X. A DCE'd or empty
+        // forEachActive would leave the sink near 0, far below this lower bound --
+        // so the composite lane cannot masquerade as measuring a body it skipped.
+        check(compositeSink >= SPIKE_OPS * CAP * COMPOSITE_X,
+            () => `T6: composite forEachActive visited too few -- sink=${compositeSink} < ` +
+                `${SPIKE_OPS * CAP * COMPOSITE_X} (a vacuous or eliminated visit)`);
 
         if (breaking('t6')) {
             if (!controlTripped(report)) {
-                die('T6: composite control armed but verdict=' + report.verdict +
+                // DEFEATED: the injected allocations were NOT caught. Emit the
+                // defeat token so the driver distinguishes this from a working
+                // control (both exit non-zero with a T6: tag otherwise).
+                controlDefeated('T6: composite control armed but verdict=' + report.verdict +
                     ' (expected "fail"); the alloc gate did not catch the injected ' +
                     'allocations on the defining shape');
             }
@@ -175,7 +190,7 @@ export function run() {
             // as an unambiguous `fail`. Asserting `!report.ok` would accept an
             // `inconclusive` verdict as proof, which is not proof.
             if (!controlTripped(report)) {
-                die('T6: control armed but verdict=' + report.verdict +
+                controlDefeated('T6: control armed but verdict=' + report.verdict +
                     ' (expected "fail"); the alloc gate did not catch the injected ' +
                     'allocations, so it cannot be trusted to catch a real one');
             }
@@ -228,6 +243,27 @@ export function run() {
                 `so the OP-01 zero-checks below cannot be trusted`);
     }
 
+    // --- SECOND positive control: the COMPOSITE lane's own window -----------
+    // The netting window is load-bearing (the header sweep shows the NET_OPS
+    // control going BLIND at ops=5000/20000), and OP-01c runs at a DIFFERENT
+    // window -- SPIKE_OPS steps of CAP acquires, perUnit=CAP -- than the NET_OPS
+    // control above. So the NET_OPS control validating does NOT prove OP-01c's
+    // window discriminates. This control retains one object per step at OP-01c's
+    // EXACT parameters (SPIKE_OPS x CAP) and MUST read > 0, or OP-01c's zero is an
+    // unvalidated, blind zero. Same failure mode, same BLIND message.
+    {
+        const sink = [];
+        const compCtlStep = (i) => {
+            sink.push({ v: i });                 // one retained object per step
+            if (sink.length > 4096) sink.length = 0;
+        };
+        const compCtlPerAcquire = netBytesPerOp(compCtlStep, SPIKE_OPS, SPIKE_WARMUP, CAP);
+        check(compCtlPerAcquire > 0,
+            () => `T6: composite positive control read ${compCtlPerAcquire.toFixed(6)} B/acquire at the ` +
+                `composite window (ops=${SPIKE_OPS} x CAP=${CAP}) -- the netting instrument is BLIND there, ` +
+                `so the OP-01c composite zero cannot be trusted`);
+    }
+
     // --- OP-01 is FIXED: both ratchets are now hard `=== 0` checks ----------
     //
     // v1.1.0 recorded these as ratchets: draining a preallocated pool retained
@@ -263,7 +299,7 @@ export function run() {
 
         // OP-01c: the DEFINING composite shape -- acquire-to-capacity +
         // forEachActive + release-to-empty -- also nets exactly zero.
-        const compPool = new ObjectPool({ create: () => ({ x: 0 }), size: CAP, expand: false });
+        const compPool = new ObjectPool({ create: () => ({ x: COMPOSITE_X }), size: CAP, expand: false });
         const compStep = () => {
             for (let j = 0; j < CAP; j++) compPool.acquire();
             compPool.forEachActive(compositeVisit);

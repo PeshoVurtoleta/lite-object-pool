@@ -1,4 +1,4 @@
-# @zakkster/lite-object-pool v2.0.0
+# @zakkster/lite-object-pool v2.1.0
 
 > Zero-dependency object pool for games, particles, and high-frequency object churn. Zero allocation on the hot path.
 
@@ -37,33 +37,70 @@ became 0). Breaking behaviour changes, all in the CHANGELOG:
 - Expansion allocates in bounded contiguous chunks (256) rather than one object
   per acquire, so `size` can jump by a chunk (clamped by remaining `maxSize`
   room, so a finite cap stays exact).
-The option shape `{create, reset, size, expand, maxSize}` is UNCHANGED in 2.0.0.
-A capacity/prealloc/onExhausted reshape is deferred to 2.1.0 and will be ADDITIVE
-(existing config keeps working).
+The option shape `{create, reset, size, expand, maxSize}` was UNCHANGED in 2.0.0.
+
+## What 2.1.0 changed (additive)
+2.1.0 adds the canonical option triple `{capacity, prealloc, onExhausted}` (D5).
+It ADDS names and removes none, so every 2.0.0 config keeps working untouched:
+- `capacity` -- the single upper bound. Finite integer >= 0 or Infinity. Default
+  Infinity. Legacy alias: `maxSize`.
+- `prealloc` -- how much of `capacity` to build now: `"eager"` (all of it, needs a
+  finite capacity), `"lazy"` (none), or an integer count. Default 32. Legacy alias:
+  `size`.
+- `onExhausted` -- what `acquire()` does when it cannot serve: `"null"` | `"grow"` |
+  `"throw"`. Default `"grow"`. Legacy alias: `expand` (true="grow", false="null").
+The legacy `{size, expand, maxSize}` spelling is a set of PERMANENT aliases --
+supported forever, never deprecated, never warned. The two vocabularies are
+MUTUALLY EXCLUSIVE: mixing any legacy alias with any canonical name throws a
+`TypeError` naming one key from each side (e.g. `{size, capacity}` throws). Defaults
+stay 2.0.0-equal in both spellings (prealloc 32, capacity Infinity, onExhausted
+"grow"), so `new ObjectPool({create})` builds an identical pool either way.
+`{prealloc:"eager", capacity:Infinity}` throws by name (it would allocate forever).
+`onExhausted:"throw"` disambiguates OP-04's remaining pair -- its capped message
+(`exceeded capacity N`) and its exhausted message differ -- while `onExhausted:"null"`
+deliberately keeps conflating capped-vs-exhausted for the game-loop caller.
 
 ## Exports
 - `ObjectPool` -- Class
 - `VERSION` -- string, kept in lockstep with package.json and this file
 
 ## Constructor
+`new ObjectPool({ create, reset?, capacity?, prealloc?, onExhausted? })`
+or the equivalent legacy spelling
 `new ObjectPool({ create, reset?, size?, expand?, maxSize? })`
 - `create: () => T` -- Factory returning a distinct new object each call (required).
   Must return an object or function; a non-object or a duplicate identity throws.
 - `reset: (obj: T) => void` -- Called on release to clean object for reuse (default: no-op)
-- `size: number` -- Initial preallocated pool size, a finite integer >= 0 (default: 32)
-- `expand: boolean` -- Auto-expand when exhausted, a strict boolean (default: true)
-- `maxSize: number` -- Ceiling on expansion, a finite integer >= 0 or Infinity, and must be >= size (default: Infinity)
+- `capacity: number` -- Upper bound, a finite integer >= 0 or Infinity, must be >= the
+  resolved prealloc count (default: Infinity). Legacy alias: `maxSize`.
+- `prealloc: number | "eager" | "lazy"` -- How much of capacity to build now
+  (default: 32). `"eager"` needs a finite capacity. Legacy alias: `size`.
+- `onExhausted: "null" | "grow" | "throw"` -- acquire()'s empty-pool policy
+  (default: "grow"). Legacy alias: `expand` (true="grow", false="null").
+  KNOWN LIMIT (D5): `onExhausted` is a SINGLE axis, so it couples growth with the
+  terminal policy -- "grow" grows then returns null at capacity; "null" and "throw"
+  do NOT grow. So "grow up to a hard cap, THEN throw" (the leak-detection config)
+  is not expressible: `{capacity:4096, prealloc:32, onExhausted:"throw"}` throws at
+  acquire 33 and the capacity is inert ("exceeded capacity" only fires when
+  prealloc === capacity). This is a scope CHOICE, not a contradiction and not
+  forced by additivity -- "throw" is new surface with no legacy alias (`expand`
+  folds only to "grow"/"null", so `{size:32, expand:false, maxSize:4096}` is the
+  twin of onExhausted:"null", not "throw"). grow-then-throw was implementable; it
+  was deferred because it needs a second, orthogonal axis -- a future additive
+  change (see decisions/D5-options.md for the trigger).
 
 All options are validated in the constructor. A bad option throws a `TypeError`
-prefixed `ObjectPool: "<option>"`. `{maxSize < size}` throws; `expand` must be a
-real boolean. Since 2.0.0, an UNKNOWN key throws too (fail closed) with a
-did-you-mean hint -- `{maxsize: 4}` suggests `maxSize` -- and the reserved future
-names `capacity` / `prealloc` / `onExhausted` throw a message pointing at the
-additive 2.1.0 reshape rather than a generic error. This is all constructor-cold:
-acquire/release/forEachActive gain zero instructions.
+prefixed `ObjectPool: "<option>"`. `{capacity < prealloc}` / `{maxSize < size}`
+throw; `expand` must be a real boolean; `onExhausted` must be one of the three
+strings; `{prealloc:"eager", capacity:Infinity}` throws by name. The legacy and
+canonical vocabularies are MUTUALLY EXCLUSIVE -- `{size, capacity}` or
+`{expand, onExhausted}` throws naming one key from each side. An UNKNOWN key throws
+(fail closed) with a did-you-mean hint -- `{maxsize: 4}` suggests `maxSize`. This is
+all constructor-cold: acquire/release/forEachActive gain zero instructions (their
+bodies are byte-identical to 2.0.0, pinned by hash in the test suite).
 
 ## API
-- `.acquire(): T | null` -- Get an object. Returns null when exhausted (expand:false) or capped (at maxSize). THROWS on use-after-destroy.
+- `.acquire(): T | null` -- Get an object. Under onExhausted:"grow" grows (or returns null at capacity); "null" returns null when exhausted or capped; "throw" throws with distinct capped-vs-exhausted text. THROWS on use-after-destroy.
 - `.release(obj): boolean` -- Return an object; calls reset(). Returns false on a genuine double-release. THROWS on a foreign object (never issued here) and on use-after-destroy.
 - `.releaseAll()` -- Release all acquired objects (reverse loop, no iterator). THROWS on use-after-destroy.
 - `.forEachActive(callback, thisArg?)` -- Iterate active objects in REVERSE. Releasing the CURRENT object mid-iteration is safe and contractual; releaseAll() mid-walk stops it; other mutation is unspecified. Order is unspecified. THROWS on use-after-destroy.

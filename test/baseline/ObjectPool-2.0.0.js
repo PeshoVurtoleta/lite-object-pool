@@ -1,4 +1,19 @@
 /**
+ * FROZEN BASELINE -- @zakkster/lite-object-pool ObjectPool.js at v2.0.0 (git c5a3dd9).
+ *
+ * This is a byte-for-byte copy of the SHIPPED 2.0.0 source, carried in-repo as the
+ * A/B oracle for the P2b speed tier (test/torture/t2-speed.mjs) and as the source of
+ * the four hot-body hashes the suite pins. It is FROZEN. Do NOT "fix", reformat,
+ * lint, or modernize it -- it is not live code, it is a historical artifact. Any
+ * edit to a hot body here (whitespace included) changes its .toString() hash and
+ * fails a named test in ObjectPool.test.js, which is the point. The precedent is
+ * T5, which carries its v1 oracle in-repo rather than fetching it from git or npm.
+ *
+ * Not shipped: excluded from package.json files[]. The header below is intentionally
+ * the ONLY departure from git show c5a3dd9:ObjectPool.js.
+ */
+
+/**
  * @zakkster/lite-object-pool -- Zero-dependency Object Pool
  *
  * A tiny, fast, ES6 object pool for games, particles, scratch effects,
@@ -13,19 +28,11 @@
  * per-object slot index kept in a per-instance `WeakMap`. Nothing on the hot
  * path allocates: a fully preallocated pool doing acquire / release /
  * releaseAll / forEachActive allocates ZERO bytes. See decisions/ for D1
- * (structure + WeakMap selection), D2 (order), D3 (iteration), D4 (exhaustion),
- * D5 (the 2.1.0 option reshape).
- *
- * v2.1.0 adds the ADDITIVE option triple {capacity, prealloc, onExhausted} (D5).
- * The legacy {size, expand, maxSize} spelling keeps working as PERMANENT aliases;
- * the two vocabularies are mutually exclusive and mixing them throws. All of it
- * is constructor-cold -- the hot bodies are byte-identical to 2.0.0.
+ * (structure + WeakMap selection), D2 (order), D3 (iteration), D4 (exhaustion).
  *
  * Features:
  * - Preallocates objects for GC-free reuse -- zero allocation on the hot path
- * - Optional auto-expansion in bounded chunks with a capacity ceiling
- * - onExhausted policy: return null, grow, or throw (a distinct capped-vs-
- *   exhausted message) when acquire() cannot serve
+ * - Optional auto-expansion in bounded chunks with a maxSize ceiling
  * - O(1) acquire, release, and double-release protection (no hash on the hot path)
  * - forEachActive() reverse iteration -- releasing the current object is safe
  * - User-defined create() and reset() callbacks
@@ -50,19 +57,21 @@ const EMPTY_U32 = new Uint32Array(0);
 const GROW_CHUNK = 256;
 
 /** Package version. Kept in sync with package.json and llms.txt. */
-export const VERSION = '2.1.0';
+export const VERSION = '2.0.0';
 
 /** The only option keys this version recognizes. Anything else is rejected at
- *  construction (fail closed on an unverified state). The 2.1.0 canonical triple
- *  (capacity/prealloc/onExhausted) and the permanent legacy aliases
- *  (size/expand/maxSize) are both listed; mixing the two vocabularies is caught
- *  separately in the constructor (D5). */
-const ALLOWED_KEYS = ['create', 'reset', 'size', 'expand', 'maxSize', 'capacity', 'prealloc', 'onExhausted'];
+ *  construction (fail closed on an unverified state). */
+const ALLOWED_KEYS = ['create', 'reset', 'size', 'expand', 'maxSize'];
 
-/** The legacy alias vocabulary and the 2.1.0 canonical vocabulary. Presence of
- *  any key from each set in the same options object is a contradiction (D5). */
-const LEGACY_KEYS = ['size', 'expand', 'maxSize'];
-const CANONICAL_KEYS = ['capacity', 'prealloc', 'onExhausted'];
+/** Names reserved for the additive 2.1.0 capacity/prealloc reshape. A caller who
+ *  reads the CHANGELOG and reaches for one today gets a version-specific answer
+ *  instead of a generic "unknown option", so they are not left guessing whether
+ *  they mistyped a name or picked the wrong version. */
+const FUTURE_KEYS = {
+    capacity: 'is not an option in 2.0.0; the capacity/prealloc reshape lands additively in 2.1.0. Use "size" and "maxSize".',
+    prealloc: 'is not an option in 2.0.0; the capacity/prealloc reshape lands additively in 2.1.0. Use "size" (eager) or "expand".',
+    onExhausted: 'is not an option in 2.0.0; the exhaustion-policy reshape lands additively in 2.1.0. Use "expand" and "maxSize".',
+};
 
 /**
  * Levenshtein edit distance between two short strings. Cold: called only on the
@@ -123,127 +132,64 @@ function received(v) {
 export class ObjectPool {
     /**
      * @param {Object} options
-     * @param {Function} options.create        Factory function that returns a new object
-     * @param {Function} [options.reset]       Called on release to clean an object for reuse
-     * @param {number|"eager"|"lazy"} [options.prealloc]  How many of `capacity` to build now. Default: 32
-     * @param {number}   [options.capacity]    Upper bound on total objects. Default: Infinity
-     * @param {"null"|"grow"|"throw"} [options.onExhausted]  What acquire() does when it cannot serve. Default: "grow"
-     * @param {number}   [options.size]        Legacy alias for `prealloc` (a count). Default: 32
-     * @param {boolean}  [options.expand]      Legacy alias for `onExhausted` (true="grow", false="null"). Default: true
-     * @param {number}   [options.maxSize]     Legacy alias for `capacity`. Default: Infinity
+     * @param {Function} options.create   Factory function that returns a new object
+     * @param {Function} [options.reset]  Called on release to clean an object for reuse
+     * @param {number}   [options.size]   Initial pool size (preallocated). Default: 32
+     * @param {boolean}  [options.expand] Auto-expand when exhausted. Default: true
+     * @param {number}   [options.maxSize] Maximum pool size (prevents runaway expansion). Default: Infinity
      */
     constructor(options) {
-        const { create, reset = NOOP } = options;
+        const { create, reset = NOOP, size = 32, expand = true, maxSize = Infinity } = options;
 
-        // --- create / reset validation (P1, v1.1.0 -- unchanged) --------------
-        // Constructor-cold: runs once at construction, never on the hot path.
-        // Every message is prefixed `ObjectPool: "<option>"` so the library and
-        // the offending option are both greppable.
+        // --- Option validation (P1, v1.1.0 -- unchanged) ----------------------
+        // Every check here is constructor-cold: it runs once, at construction,
+        // and never on acquire()/release()/forEachActive(). One TypeError per
+        // bad option, every message prefixed `ObjectPool: "<option>"` so the
+        // library and the offending option are both greppable. Ordered
+        // create -> reset -> size -> maxSize -> expand -> the maxSize>=size
+        // contradiction, so the contradiction is only reported once both
+        // numbers are known-clean.
         if (typeof create !== 'function') {
             throw new TypeError('ObjectPool: "create" is required and must be a function, received ' + received(create));
         }
         if (typeof reset !== 'function') {
             throw new TypeError('ObjectPool: "reset" must be a function if provided, received ' + received(reset));
         }
-
-        // --- Option vocabulary: legacy aliases vs the 2.1.0 canonical triple ---
-        // ONE alias-fold site (D5). The legacy {size, expand, maxSize} and the
-        // canonical {capacity, prealloc, onExhausted} vocabularies are MUTUALLY
-        // EXCLUSIVE: mixing any key from each throws, because letting one win
-        // silently reintroduces the contradiction class this reshape deletes.
-        // `undefined` counts as ABSENT (an explicit `key: undefined` is not
-        // "provided"), matching 2.0.0's optional-key rule. Aliases are permanent
-        // and never warned -- a constructor warn is an allocation and a side
-        // effect this library does not have. Everything below normalizes to the
-        // internal triple `_expand` / `_maxSize` / `_onExh` so the rest of the
-        // class reads only the canonical shape.
-        const { size, expand, maxSize, capacity, prealloc, onExhausted } = options;
-        const legacyKey = size !== undefined ? 'size' : expand !== undefined ? 'expand' : maxSize !== undefined ? 'maxSize' : null;
-        const canonKey = capacity !== undefined ? 'capacity' : prealloc !== undefined ? 'prealloc' : onExhausted !== undefined ? 'onExhausted' : null;
-        if (legacyKey !== null && canonKey !== null) {
-            throw new TypeError('ObjectPool: "' + legacyKey + '" (a legacy alias) and "' + canonKey +
-                '" (the 2.1.0 spelling) set the same pool from two vocabularies -- use one, not both. ' +
-                'The aliases size/expand/maxSize map to prealloc/onExhausted/capacity.');
+        if (typeof size !== 'number' || !Number.isInteger(size) || size < 0) {
+            throw new TypeError('ObjectPool: "size" must be a finite integer >= 0, received ' + received(size));
+        }
+        if (maxSize !== Infinity && (typeof maxSize !== 'number' || !Number.isInteger(maxSize) || maxSize < 0)) {
+            throw new TypeError('ObjectPool: "maxSize" must be a finite integer >= 0 or Infinity, received ' + received(maxSize));
+        }
+        if (typeof expand !== 'boolean') {
+            throw new TypeError('ObjectPool: "expand" must be a boolean if provided, received ' + received(expand));
+        }
+        if (maxSize < size) {
+            throw new TypeError('ObjectPool: "maxSize" (' + maxSize + ') must be >= "size" (' + size + ')');
         }
 
-        // Normalize BOTH spellings to (preallocSpec, cap, onExh). The legacy path
-        // keeps its 2.0.0 validation messages byte-identical (tests pin them);
-        // the canonical path names capacity/prealloc/onExhausted. Defaults are
-        // 2.0.0-equal in either vocabulary: prealloc 32, capacity Infinity,
-        // onExhausted "grow" (D5 records this as a deliberate overturn of the
-        // roadmap's eager + fail-closed default, which would have been breaking).
-        let preallocSpec;
-        let cap;
-        let onExh;
-        if (canonKey !== null) {
-            cap = capacity === undefined ? Infinity : capacity;
-            preallocSpec = prealloc === undefined ? 32 : prealloc;
-            onExh = onExhausted === undefined ? 'grow' : onExhausted;
-
-            if (cap !== Infinity && (typeof cap !== 'number' || !Number.isInteger(cap) || cap < 0)) {
-                throw new TypeError('ObjectPool: "capacity" must be a finite integer >= 0 or Infinity, received ' + received(cap));
-            }
-            if (onExh !== 'null' && onExh !== 'grow' && onExh !== 'throw') {
-                throw new TypeError('ObjectPool: "onExhausted" must be "null", "grow", or "throw", received ' + received(onExhausted));
-            }
-            if (preallocSpec === 'eager') {
-                if (cap === Infinity) {
-                    throw new TypeError('ObjectPool: "prealloc" is "eager" but "capacity" is Infinity -- an eager pool needs a finite capacity to build, or it would allocate forever');
-                }
-                preallocSpec = cap;
-            } else if (preallocSpec === 'lazy') {
-                preallocSpec = 0;
-            } else if (typeof preallocSpec !== 'number' || !Number.isInteger(preallocSpec) || preallocSpec < 0) {
-                throw new TypeError('ObjectPool: "prealloc" must be a finite integer >= 0, "eager", or "lazy", received ' + received(prealloc));
-            }
-            if (cap < preallocSpec) {
-                throw new TypeError('ObjectPool: "capacity" (' + cap + ') must be >= "prealloc" (' + preallocSpec + ')');
-            }
-        } else {
-            // Legacy vocabulary (or nothing at all -> 2.0.0 defaults). Validation
-            // order and messages are byte-identical to 2.0.0: size -> maxSize ->
-            // expand -> the maxSize >= size contradiction.
-            const sz = size === undefined ? 32 : size;
-            const mx = maxSize === undefined ? Infinity : maxSize;
-            const ex = expand === undefined ? true : expand;
-            if (typeof sz !== 'number' || !Number.isInteger(sz) || sz < 0) {
-                throw new TypeError('ObjectPool: "size" must be a finite integer >= 0, received ' + received(sz));
-            }
-            if (mx !== Infinity && (typeof mx !== 'number' || !Number.isInteger(mx) || mx < 0)) {
-                throw new TypeError('ObjectPool: "maxSize" must be a finite integer >= 0 or Infinity, received ' + received(mx));
-            }
-            if (typeof ex !== 'boolean') {
-                throw new TypeError('ObjectPool: "expand" must be a boolean if provided, received ' + received(ex));
-            }
-            if (mx < sz) {
-                throw new TypeError('ObjectPool: "maxSize" (' + mx + ') must be >= "size" (' + sz + ')');
-            }
-            preallocSpec = sz;
-            cap = mx;
-            onExh = ex ? 'grow' : 'null';
-        }
-
-        // Unknown-key rejection (fail closed). Ordered AFTER the per-option
-        // checks so a caller passing both a bad `size` and a typo'd key still
-        // gets the `size` error first. Constructor-cold. Any unknown key gets a
-        // did-you-mean hint over the eight known names.
+        // Unknown-key rejection (fail closed on an unverified state). Ordered
+        // AFTER the P1 per-option checks so a caller passing both a bad `size`
+        // and a typo'd key still gets the `size` error first -- P1's messages and
+        // their order stay byte-identical. Constructor-cold: the hot path gains
+        // nothing. A key reserved for 2.1.0 gets a version-specific message; any
+        // other unknown key gets a did-you-mean hint over the five known names.
         for (const key of Object.keys(options)) {
             if (ALLOWED_KEYS.indexOf(key) !== -1) continue;
+            if (Object.prototype.hasOwnProperty.call(FUTURE_KEYS, key)) {
+                throw new TypeError('ObjectPool: "' + key + '" ' + FUTURE_KEYS[key]);
+            }
             const hint = suggestKey(key);
             throw new TypeError(
                 'ObjectPool: "' + key + '" is not a recognized option' +
                 (hint ? '; did you mean "' + hint + '"?' : '.') +
-                ' Known options: create, reset, capacity, prealloc, onExhausted (or the aliases size, expand, maxSize)');
+                ' Known options: create, reset, size, expand, maxSize');
         }
 
         this._create = create;
         this._reset = reset;
-        // Internal exhaustion triple, pre-normalized from either vocabulary.
-        // `_expand` (grow policy) and `_onExh` (how a non-growing miss is
-        // reported) are the only things the cold `_grow` reads.
-        this._onExh = onExh;
-        this._expand = onExh === 'grow';
-        this._maxSize = cap;
+        this._expand = expand;
+        this._maxSize = maxSize;
         this._destroyed = false;
 
         // --- Sparse-set core (D1) ---------------------------------------------
@@ -262,12 +208,11 @@ export class ObjectPool {
         this._size = 0;     // number of objects actually created
         this._active = 0;   // cursor: how many are checked out
 
-        // Preallocation of `preallocSpec` objects. Validation guarantees it is a
-        // clean integer and `capacity >= preallocSpec`. `prealloc:"eager"` has
-        // already been resolved to the (finite) capacity above.
-        if (preallocSpec > 0) {
-            this._reserve(preallocSpec);
-            for (let i = 0; i < preallocSpec; i++) this._append(create());
+        // Eager preallocation of `size` objects. Validation guarantees `size`
+        // is a clean integer and `maxSize >= size`.
+        if (size > 0) {
+            this._reserve(size);
+            for (let i = 0; i < size; i++) this._append(create());
         }
     }
 
@@ -341,20 +286,7 @@ export class ObjectPool {
         if (this._destroyed) {
             throw new Error('ObjectPool: acquire() called on a destroyed pool');
         }
-        if (!this._expand || this._size >= this._maxSize) {
-            // Cannot serve: growth is off, or the pool is grown to capacity. The
-            // ONE onExhausted branch (D5). "throw" reports the miss as a caller
-            // bug with DISTINCT text -- capped-at-capacity vs exhausted-below-it.
-            // "null" (and the capped case under "grow") return null and still
-            // conflate the two: OP-04's remainder, kept on purpose for the
-            // game-loop caller who treats "no object this frame" as one thing.
-            if (this._onExh === 'throw') {
-                throw new Error(this._size >= this._maxSize
-                    ? 'ObjectPool: acquire() exceeded capacity ' + this._maxSize + ' (onExhausted:"throw")'
-                    : 'ObjectPool: acquire() on an exhausted pool of ' + this._size + ' object(s) (onExhausted:"throw")');
-            }
-            return null;
-        }
+        if (!this._expand || this._size >= this._maxSize) return null;
 
         const room = this._maxSize - this._size;         // Infinity - n stays Infinity
         const n = room < GROW_CHUNK ? room : GROW_CHUNK;

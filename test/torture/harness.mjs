@@ -41,7 +41,7 @@ export const SEED = (() => {
  * T0 runs before T6, trips, and exits, so T6's and T7's controls never execute.
  * A control that is never executed is not a proven control.
  *
- * So the value may instead name ONE tier -- `t0`, `t6`, `t7` -- arming that
+ * So the value may instead name ONE tier -- `t0`, `t2`, `t6`, `t7` -- arming that
  * control alone and leaving the others clean. `npm run torture:controls` walks
  * every tier in turn and requires each to exit non-zero on its own.
  */
@@ -50,9 +50,29 @@ const BREAK_RAW = (process.env.OBJECTPOOL_TORTURE_BREAK || '').trim().toLowerCas
 /** True when any control is armed. Kept for the entry-point's final backstop. */
 export const BREAK = BREAK_RAW !== '' && BREAK_RAW !== '0';
 
-/** The tiers whose controls this run has armed. */
+/**
+ * Tiers that OWN an injectable control keyed to `breaking(tier)`. Arming one of
+ * these alone MUST trip THAT tier for THAT tier's reason -- it prints that tier's
+ * `TN:` tag and exits non-zero. `controls.mjs` walks these with the strict check.
+ *
+ * Every OTHER armable tier (T1/T3/T4/T5/T9) owns NO injectable control by design:
+ * T1/T3/T4 are pure assertion tiers, T5 is a differential-fuzz tier that
+ * documents "T5 owns no control; T9 owns the oracle-corruption control", and T9's
+ * controls run on EVERY invocation rather than being armed. Arming one of those
+ * exercises the entry-point BACKSTOP instead (no tier trips -> "every control
+ * still passed" -> non-zero exit), which `controls.mjs` walks with the backstop
+ * check. Proving the backstop bites is itself a real property: arming a tier that
+ * has no control must fail SAFE, never silently print "ok".
+ */
+export const CONTROL_OWNING_TIERS = ['t0', 't2', 't6', 't7'];
+
+/** Every tier id that can be named in OBJECTPOOL_TORTURE_BREAK. controls.mjs
+ *  walks all of them; CONTROL_OWNING_TIERS decides which check each one gets. */
+export const ALL_ARMABLE_TIERS = ['t0', 't1', 't2', 't3', 't4', 't5', 't6', 't7', 't9'];
+
+/** The tiers whose controls this run has armed. `1`/`all` arms the owning set. */
 export const BREAK_TIERS = BREAK_RAW === '1' || BREAK_RAW === 'all'
-    ? ['t0', 't6', 't7']
+    ? CONTROL_OWNING_TIERS.slice()
     : BREAK_RAW.split(',').map((s) => s.trim()).filter(Boolean);
 
 /**
@@ -80,6 +100,31 @@ export function makePrng(seed) {
 /** Fail the whole gate. stdout stays clean; the reason goes to stderr. */
 export function die(msg) {
     process.stderr.write('torture: FAIL -- ' + msg + '\n');
+    process.exit(1);
+}
+
+/** The distinct token a DEFEATED control emits. `controls.mjs` asserts it is
+ *  ABSENT on a healthy run. Kept here as the single source of truth so the
+ *  emitter (controlDefeated) and the driver's grep cannot drift apart. */
+export const CONTROL_DEFEATED_TOKEN = 'CONTROL-DEFEATED';
+
+/** The entry-point backstop message, printed when a control is armed but no tier
+ *  trips. Shared so the driver greps the exact string, not a paraphrase. */
+export const BACKSTOP_MESSAGE = 'OBJECTPOOL_TORTURE_BREAK set but every control still passed';
+
+/**
+ * A control was ARMED but the gate did NOT catch the injected fault -- the gate
+ * is DEFEATED (e.g. a budget was widened until nothing can trip it). This is a
+ * DIFFERENT outcome from a control that fired correctly, yet both must exit
+ * non-zero, so a driver that only checks the exit code and the tier tag cannot
+ * tell them apart. Emitting CONTROL_DEFEATED_TOKEN lets `controls.mjs` (not just
+ * a human) distinguish a working control from a broken one. Use this in the
+ * "armed but did NOT trip" branch of any both-branches-fail control; use `die`
+ * only in the "tripped correctly" branch.
+ * @param {string} msg
+ */
+export function controlDefeated(msg) {
+    process.stderr.write('torture: ' + CONTROL_DEFEATED_TOKEN + ' -- ' + msg + '\n');
     process.exit(1);
 }
 
