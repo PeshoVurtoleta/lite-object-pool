@@ -232,8 +232,12 @@ ASSERTIONS
   - `{debug: true}` throws by name. This test PINS behaviour that already exists
     at 2.1.0; it does not create it.
   - Three-place version sync (VERSION === package.json === llms.txt header).
-  - `npm pack --dry-run` ships exactly 8 files; still excludes `test/`,
-    `decisions/`, `probe/`, `BRIEF*.md`, the roadmap.
+  - `npm pack --dry-run` ships exactly 9 files; still excludes `test/`,
+    `decisions/`, `probe/`, `BRIEF*.md`, the roadmap. [CORRECTED 2026-08-17 from
+    "8": this brief's 7+1 count omitted that a new public export
+    (`./debug`) needs its own `ObjectPoolDebug.d.ts`, or a consumer under
+    moduleResolution:nodenext + strict hits TS7016. The debug subpath ships a
+    `.js` AND a `.d.ts`, so 7 -> 9.]
   - Hot bodies byte-identical if the counters moved (proven by the existing T2
     precondition, HOT_HASHES untouched); if kept, the assertion inverts and the
     CHANGELOG carries the ratio.

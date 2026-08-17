@@ -10,7 +10,7 @@ gc_maxPauseMs: 4
 alloc_bytes_per_op: 0
 leak_cycles: 4096
 peers: []
-findings: [OP-13 (remainder)]
+findings: []              # OP-13 closed 2026-08-17: half done, half false premise
 depends_on: [BRIEF3 / 2.3.0 bench + demo]
 ---
 
@@ -26,8 +26,12 @@ TASKS
     `ObjectPool.js`, and the `llms.txt` header line.
   - **README rebuilt on the LiteSepforge blueprint per CLAUDE.md.** This is
     genuinely outstanding -- the current README is on the old spine (Features /
-    Installation / Quick Start / API / How It Works / ...) with no badges, no
-    TOC, no positioning H2 and no "Why this exists". The blueprint order is:
+    Installation / Quick Start / API / How It Works / ...). Badges it already
+    HAS: nine, at `README.md:5-13` -- keep them, do not re-derive them.
+    [CORRECTED 2026-08-17: this brief said "no badges"; that was wrong.]
+    Genuinely absent, each verified: TOC, the positioning H2, "Why this
+    exists", "What you get", Composability, "Design decisions worth knowing",
+    and "What this is not". The blueprint order is:
     title + one-line blockquote tagline; badges; a positioning H2 ("The X the
     ecosystem was missing") with inline install and runnable quick-start; TOC;
     Why this exists; What you get; a `<details>` deep-dive on the core surface;
@@ -37,10 +41,17 @@ TASKS
     worth knowing; Testing (test count + npm scripts); What this is not;
     Ecosystem; License. ASCII-only (`->`, `<=`, `x`, "degrees"). Keep it in
     `files[]`.
-  - **OP-13's remainder.** `engines.node` is already `>=18`, so that half is
-    done. Still open: `homepage`, `repository.url`, `bugs.url` and
-    `funding.url` in `package.json` all still point at the `PeshoVurtoleta` org
-    (lines 50-61). Fix all four.
+  - **OP-13 is CLOSED. Do not action it.** `engines.node` is already `>=18`.
+    The other half of this task was to "fix" `homepage`, `repository.url`,
+    `bugs.url` and `funding.url` because they point at `PeshoVurtoleta` --
+    [STRUCK 2026-08-17, false premise]. `PeshoVurtoleta` is the author's real
+    GitHub handle and `zakkster` is the npm handle; both are correct and it has
+    always been that way. Verified: `git remote -v` resolves there, and every
+    sibling package in the suite spells its URLs the same. Actioning this task
+    would have broken the working repository link on npm and desynced this
+    package from ~17 siblings. The sponsor badge at `README.md:6` stays as-is
+    for the same reason. Carry this note into the README rebuild so the next
+    reader does not "fix" it again.
   - **The migration section, v1 -> v2. It is TEN breaking changes, not four.**
     The roadmap's P5 brief lists four and says "do not round this to drop-in" --
     correct instinct, stale count. Take the list from the 2.0.0 CHANGELOG's
@@ -90,7 +101,12 @@ ASSERTIONS
   - The migration section lists all ten breaking changes; a reviewer checks it
     against the 1.1.0 and 2.0.0 CHANGELOG entries line by line, and the count is
     asserted rather than eyeballed.
-  - No `PeshoVurtoleta` string survives anywhere in the shipped files.
+  - [STRUCK 2026-08-17] This brief asserted "No `PeshoVurtoleta` string
+    survives anywhere in the shipped files." That assertion was destructive --
+    see the closed OP-13 task above. The replacement assertion is its
+    inverse: `repository.url` still resolves to the live remote, and the four
+    package.json URLs plus the `README.md:6` sponsor badge are UNCHANGED by
+    this release.
   - `node --test` green; `npm run torture` prints "ok"; every control fails.
 
 NON-GOALS

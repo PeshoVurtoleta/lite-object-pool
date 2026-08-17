@@ -30,10 +30,14 @@ TASKS
     interesting one and it is the one v1 loses on.
   - **Two object shapes, unconditionally.** The roadmap wrote this as "use two
     object shapes IF the OP-17 probe showed polymorphism costs". It ran during
-    P2a and it DID: the mixed-mechanism lane measured 0.0022-0.0055 B/op, which
+    P2a and it DID: the mixed-mechanism lane measured 0.0055 B/op, which
     is what killed the symbol-with-WeakMap-fallback design and forced
     WeakMap-only. The condition is satisfied, so the conditional is gone -- bench
     two shapes, and say in the bench notes that this is why.
+    [CORRECTED 2026-08-17: this brief read "0.0022-0.0055 B/op" and told the
+    bench author to cite `probe/poly.mjs`. The measured figure is 0.0055 and it
+    lives at `decisions/D1-structure.md:119`; the string "0.0022" appears
+    nowhere in the repo. Cite the decision record, not the probe.]
   - The v1 comparison needs a v1 implementation to bench against. One already
     exists in-repo: T5's differential fuzz carries a v1 Set-based oracle. Reuse
     it rather than re-deriving one or pulling 1.1.0 off npm at bench time, and
@@ -47,10 +51,28 @@ TASKS
     throttle, multi-scene `data-scene` tabs:
       * particle burst scene (the spike shape -- the OP-01 workload, live)
       * churn stress scene (steady 1:1 at capacity)
-      * live watchPool pool-escape canary scene wired to lite-gc-profiler
-        (this is the 2.2.0 `stats(out)` surface earning its keep -- if the
-        canary cannot be driven from the demo, `stats()` was shaped wrong and
-        that is a finding for 2.2.0, not a patch here)
+      * leak-hunt scene on the 2.2.0 `/debug` subpath: a `DebugObjectPool` with
+        acquire-site tagging, a deliberate never-released cohort, and
+        `createPoolLeakKernel().audit()` naming the offending call site live.
+        This is the debug lane earning its keep. Show the cost honestly next to
+        it -- the measured net is ~97 B/acquire with `captureStacks` off and
+        ~1.4 KB with it on, so the scene must also demonstrate that the debug
+        lane is NOT the shipping hot path.
+        [CORRECTED 2026-08-17. This brief asked for a "live watchPool
+        pool-escape canary scene wired to lite-gc-profiler", and said that if
+        the canary could not be driven from the demo then `stats()` was shaped
+        wrong and that was a finding against 2.2.0. That task was unbuildable
+        and the finding it threatened would have been false. Four reasons,
+        all verified against `lite-gc-profiler/llms.txt:195-218` during the
+        2.2.0 session: `watchPool` takes `(obj, slotId)` pairs, not a stats
+        object; it detects the INVERSE condition (a pooled object that died);
+        it is async and does not compose with `stabilize:'deep'`; and it has
+        no pass verdict, so it can never be a gate. On top of that, `_items[]`
+        holds a strong ref to every pooled object for the pool's lifetime, so
+        a pool escape is impossible by construction and the canary would read
+        zero forever. `stats(out)` still earns its keep in this demo -- it is
+        what feeds the per-frame telemetry readout at 0 B/op -- but it is not
+        wired to `watchPool`, because nothing can be.]
   - Demo is never in `files[]`.
   - **Load the `demo-audit` skill before writing demo code.** The forced-reflow
     law is invisible to the GC torture harness, and this demo reads live
