@@ -125,6 +125,7 @@ nothing to `acquire()` / `release()` -- their bodies are byte-identical to 2.0.0
 | `.release(obj)` | `boolean` | Return an object. Returns `false` on a genuine double-release; **throws** on a foreign object (never issued here) and on use-after-destroy. |
 | `.releaseAll()` | `void` | Release all acquired objects. Calls `reset()` on each. Throws on use-after-destroy. |
 | `.forEachActive(fn, thisArg?)` | `void` | Callback for every active object, in reverse. Releasing the current object mid-loop is safe. Order is unspecified. Throws on use-after-destroy. |
+| `.stats(out)` | `object` | Write `{ size, used, free, expansions }` into the caller-provided `out` and return it. Allocates nothing (since 2.2.0). `out` must be an object; a non-object -- including a no-arg call -- **throws** a `TypeError` naming `"out"` rather than silently allocating a fresh object. |
 | `.destroy()` | `void` | Drain (reset everything still out) then tear down. Idempotent. |
 
 Since 2.0.0 the pool tracks objects by identity in a `WeakMap`, so `create()`
@@ -140,6 +141,36 @@ duplicate identity throws a `TypeError` naming `create()`.
 | `.free` | `number` | Available objects in the free list |
 
 **Invariant:** `used + free === size` after every operation.
+
+### Observability -- `stats(out)` and the `/debug` subpath (since 2.2.0)
+
+`stats(out)` makes the pool observable for **zero bytes**: it writes `size`,
+`used`, `free`, and `expansions` (how many times the pool grew a chunk) into an
+object you own, and never allocates. Call it at telemetry rate:
+
+```javascript
+const snapshot = { size: 0, used: 0, free: 0, expansions: 0 };
+pool.stats(snapshot); // no allocation -- reuse the same object every tick
+```
+
+When you need to find an **acquired-never-released** object, import the separate
+debug lane -- it allocates by design and never loads in production:
+
+```javascript
+import { DebugObjectPool, createPoolLeakKernel } from '@zakkster/lite-object-pool/debug';
+
+const pool = new DebugObjectPool({ create: () => ({ x: 0 }), size: 64, captureStacks: true });
+const kernel = createPoolLeakKernel(pool); // an @zakkster/lite-leak audit()+count() kernel
+// ... run your workload ...
+console.log(kernel.count(), 'objects still out:', pool.leaks());
+```
+
+`DebugObjectPool` tags every acquire (~102 B/acquire, or ~1.2 KB with
+`captureStacks: true`) so `leaks()` and the kernel can name the acquire site.
+Note: `@zakkster/lite-gc-profiler`'s `watchPool` **cannot** observe this signal,
+because the pool retains every object it ever created -- so a checked-out object
+is never collected. Use the leak kernel above, not `watchPool`. See
+[`decisions/D6-debug-lane.md`](./decisions/D6-debug-lane.md).
 
 ## How It Works
 
@@ -302,6 +333,9 @@ scoped versions do introduce breaking changes -- each with migration notes in
   It is purely **additive**: `{size, expand, maxSize}` keep working as permanent
   aliases and every 2.0.0 config constructs an identical pool, so there is **no
   migration** -- adopt the new spelling only if you want it.
+- **`2.2.0`** adds the zero-alloc `stats(out)` method and the
+  `@zakkster/lite-object-pool/debug` subpath. Purely **additive**: the hot bodies
+  are byte-identical to 2.0.0, so there is **no migration**.
 
 ## Ecosystem
 

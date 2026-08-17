@@ -46,6 +46,25 @@ export interface ObjectPoolOptions<T> {
     maxSize?: number;
 }
 
+/**
+ * The fields `stats(out)` writes into the caller's object (since 2.2.0). These
+ * four are all free -- three getters plus `expansions`, which is counted on the
+ * cold `_grow` branch and so costs the acquire hot path nothing. The
+ * observability counters `peakUsed` / `totalAcquires` / `totalReleases` are NOT
+ * here: a measurement moved them off the hot path into the
+ * `@zakkster/lite-object-pool/debug` subpath (see decisions/D6-debug-lane.md).
+ */
+export interface ObjectPoolStats {
+    /** Total created objects (initial + expansions). */
+    size: number;
+    /** Objects currently acquired (in use). */
+    used: number;
+    /** Objects available for acquire. */
+    free: number;
+    /** Times `_grow` built a chunk over the pool's lifetime. */
+    expansions: number;
+}
+
 export class ObjectPool<T extends object = object> {
     /** Total pool size (all created objects, including expansions). */
     readonly size: number;
@@ -135,6 +154,25 @@ export class ObjectPool<T extends object = object> {
      * @throws {Error} If the pool has been destroyed.
      */
     forEachActive(callback: (this: unknown, obj: T) => void, thisArg?: unknown): void;
+
+    /**
+     * Write the pool's stats into `out` and return it, allocating nothing (since
+     * 2.2.0). Telemetry-rate, not a hot path. Writes `size` / `used` / `free` /
+     * `expansions`.
+     *
+     * Fails closed: `out` must be an object (or function). A non-object --
+     * including `undefined` (so a no-arg call throws rather than silently
+     * allocating a fresh object), `null`, or a primitive -- throws a `TypeError`
+     * naming `"out"`. A frozen / sealed-empty / getter-only target also throws
+     * naming `"out"`, and the write is transactional: on any non-writable field
+     * `out` is rolled back to its exact prior shape (keys this call created are
+     * deleted, not left `undefined`), never half-written.
+     *
+     * @param out A caller object, mutated in place and returned.
+     * @returns The same `out`, with the stats fields written.
+     * @throws {TypeError} If `out` is not an object, or is not writable for every field.
+     */
+    stats<O extends Partial<ObjectPoolStats>>(out: O): O & ObjectPoolStats;
 
     /**
      * Drain, then destroy the pool. Calls `reset()` on every object still checked

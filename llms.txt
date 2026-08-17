@@ -1,4 +1,4 @@
-# @zakkster/lite-object-pool v2.1.0
+# @zakkster/lite-object-pool v2.2.0
 
 > Zero-dependency object pool for games, particles, and high-frequency object churn. Zero allocation on the hot path.
 
@@ -60,9 +60,66 @@ stay 2.0.0-equal in both spellings (prealloc 32, capacity Infinity, onExhausted
 (`exceeded capacity N`) and its exhausted message differ -- while `onExhausted:"null"`
 deliberately keeps conflating capped-vs-exhausted for the game-loop caller.
 
+## What 2.2.0 changed (additive)
+2.2.0 makes the pool OBSERVABLE without making it allocate (D6). It ADDS a
+zero-alloc `stats(out)` method and a separate `@zakkster/lite-object-pool/debug`
+subpath; it removes nothing and the hot bodies are byte-identical to 2.0.0.
+- `stats(out)` fills a caller-provided object with `size` / `used` / `free` /
+  `expansions` and returns it, allocating NOTHING. `out` must be an object; a
+  non-object -- including `undefined` (a no-arg `stats()` throws rather than
+  silently allocating a fresh object), `null`, or a primitive -- throws a
+  `TypeError` naming `"out"`. There is no shared internal buffer to alias.
+- `expansions` counts how many times the cold `_grow` built a chunk. It is free
+  to report because `_grow` is off the acquire hot body.
+- The observability counters `peakUsed` / `totalAcquires` / `totalReleases` are
+  DELIBERATELY NOT on core `stats(out)`: a measurement (D6.6) showed adding them
+  to the shipped acquire/release hot bodies pushed the T2 differential over
+  threshold, so they moved to the `/debug` subpath instead. Core `stats(out)`
+  reports only what is free.
+
+## The /debug subpath (allocates -- NOT for production)
+`@zakkster/lite-object-pool/debug` exports `DebugObjectPool` (a public-surface
+WRAPPER around ObjectPool -- same options plus an optional `captureStacks`
+boolean) and `createPoolLeakKernel`. It is a diagnostic lane that ALLOCATES BY
+DESIGN and never loads in production; the torture alloc gate runs against the
+production build only.
+- `DebugObjectPool` tags every acquire with a monotonic id (plus, when
+  `captureStacks: true`, the acquire stack). Measured per-acquire cost
+  (node v26.3.1, darwin, net min-over-6): ~102 B/acquire with captureStacks off,
+  ~1173 B/acquire (~1.2 KB) with it on. `leaks()` returns a fresh report per call
+  naming everything still out, and also allocates.
+- `DebugObjectPool.stats(out)` reports the four core fields PLUS the moved
+  counters `peakUsed` / `totalAcquires` / `totalReleases`.
+- `createPoolLeakKernel(debugPool)` is a lite-leak kernel with `audit()` +
+  `count()` ONLY (no install, no refine): `count()` is the number of
+  acquired-never-released objects, `audit()` names each. A refine()/
+  FinalizationRegistry kernel would report clean forever here (see below).
+- WATCHPOOL CANNOT OBSERVE THIS POOL. lite-gc-profiler's `watchPool` detects a
+  pooled object that should live but DIED. Against this pool it is structurally
+  incapable of firing: `ObjectPool._items[]` retains every pooled object for the
+  pool's whole lifetime, so no checked-out object is ever collected and
+  `escapeCount` is 0 by construction, forever. Use `createPoolLeakKernel` for the
+  acquired-never-released signal, not watchPool.
+
+## /debug API
+DebugObjectPool's public surface, drift-guarded against the prototype in BOTH
+directions by torture T8 (like the core `## API` below):
+- `.acquire()` -- Acquire and tag. Returns null at capacity under "null"/"grow".
+- `.release(obj)` -- Release and drop the tag; delegates every pool guard (foreign throws, double-release false, use-after-destroy throws).
+- `.releaseAll()` -- Release everything and clear all tags.
+- `.forEachActive(callback, thisArg?)` -- Iterate active objects (delegated).
+- `.destroy()` -- Drain, destroy, and drop all tags (delegated). Idempotent.
+- `.used` -- Objects currently acquired (getter).
+- `.free` -- Objects available for acquire (getter).
+- `.size` -- Total created objects (getter).
+- `.outstanding()` -- How many objects are acquired-but-not-released (tagged).
+- `.leaks()` -- A fresh report naming everything still out. Allocates per call.
+- `.stats(out)` -- Write the four core fields plus peakUsed/totalAcquires/totalReleases into out; fails closed naming "out" like the core (never half-writes).
+
 ## Exports
 - `ObjectPool` -- Class
 - `VERSION` -- string, kept in lockstep with package.json and this file
+- `@zakkster/lite-object-pool/debug`: `DebugObjectPool`, `createPoolLeakKernel`
 
 ## Constructor
 `new ObjectPool({ create, reset?, capacity?, prealloc?, onExhausted? })`
@@ -107,6 +164,7 @@ bodies are byte-identical to 2.0.0, pinned by hash in the test suite).
 - `.used` -- Number of objects currently in use (getter).
 - `.free` -- Number of available objects (getter).
 - `.size` -- Total created objects (getter).
+- `.stats(out)` -- Write `{size, used, free, expansions}` into the caller object `out` and return it; allocates nothing. Throws a TypeError naming `"out"` if `out` is not an object (a no-arg call throws -- it never silently allocates).
 - `.destroy()` -- Drain (reset everything still out) then tear down. Idempotent.
 
 Invariant: `used + free === size` after every operation.

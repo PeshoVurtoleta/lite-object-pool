@@ -309,6 +309,19 @@ export function run() {
         check(compPerAcquire === 0,
             () => `OP-01c NOT fixed: composite retained ${compPerAcquire.toFixed(4)} B/acquire (must be 0)`);
 
+        // stats(out) (2.2.0): telemetry-rate observability that must net EXACTLY
+        // zero. Runs on the SAME already-validated NET_OPS/perUnit=1 window as
+        // OP-01b -- the NET_OPS positive control above proves that window
+        // discriminates, so this zero is a validated zero. Writing the four core
+        // fields into a caller-owned object allocates nothing; the check is === 0,
+        // never <= epsilon (widening it is the blinding mode arming t6 catches).
+        const statsPool = new ObjectPool({ create: () => ({ x: 0 }), size: CAP, expand: false });
+        const statsOut = { size: 0, used: 0, free: 0, expansions: 0 };
+        const statsStep = () => { statsPool.stats(statsOut); };
+        const statsPerOp = netBytesPerOp(statsStep, NET_OPS, NET_WARMUP, 1);
+        check(statsPerOp === 0,
+            () => `T6: stats(out) retained ${statsPerOp.toFixed(4)} B/op (must be 0)`);
+
         allocBytesPerOp = churnPerOp;
     }
 

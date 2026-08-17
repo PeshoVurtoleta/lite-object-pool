@@ -9,6 +9,87 @@ Version is synced in three places from 1.0.3 forward: `package.json`, the
 `VERSION` const exported from `ObjectPool.js`, and the header line of
 `llms.txt`.
 
+## [2.2.0] -- 2026-08-17
+
+Session P3. Make the pool OBSERVABLE without making it allocate. Recorded in
+`decisions/D6-debug-lane.md`. Purely additive -- the hot bodies (`acquire`,
+`release`, `releaseAll`, `forEachActive`) are BYTE-IDENTICAL to 2.0.0; their four
+pinned `.toString()` hashes did not move, and the T2 differential-speed tier
+still gates the shipped pool against the frozen 2.0.0 copy as an identical-body
+noise-floor gate.
+
+### Added
+
+- **`stats(out)`** -- writes `{size, used, free, expansions}` into a
+  caller-provided object and returns it, allocating NOTHING (gated at `=== 0`
+  B/op by torture T6 at the already-validated NET_OPS window). `expansions` is
+  free to report because it is counted only on the cold `_grow` branch, off the
+  acquire hot body. `out` fails closed: a non-object -- including `undefined`, so
+  a no-arg `stats()` throws rather than silently allocating a fresh object -- is a
+  `TypeError` naming `"out"`. A frozen / sealed-empty / getter-only `out` also
+  throws naming `"out"`, and the write is TRANSACTIONAL: on any non-writable
+  field `out` is rolled back to exactly what it was, never left half-written with
+  fresh values in some fields and stale ones in others. There is no shared
+  internal buffer to alias.
+- **The `@zakkster/lite-object-pool/debug` subpath** -- a second entry point
+  (`DebugObjectPool`, `createPoolLeakKernel`) that ALLOCATES BY DESIGN and never
+  loads in production.
+  - `DebugObjectPool` is a public-surface WRAPPER (it reads no `_items`/`_sparse`/
+    `_slots`) that tags every acquire with a monotonic id, plus the acquire stack
+    when constructed `{ captureStacks: true }`. `leaks()` names everything still
+    out; its `stats(out)` adds the moved counters `peakUsed` / `totalAcquires` /
+    `totalReleases`. Measured cost (node v26.3.1, darwin, net min-over-6):
+    ~102 B/acquire with `captureStacks` off, ~1173 B/acquire (~1.2 KB) with it on.
+  - `createPoolLeakKernel(debugPool)` is a `@zakkster/lite-leak` kernel with
+    `audit()` + `count()` ONLY (no `install`, no `refine`): `count()` is the
+    number of acquired-never-released objects. A `refine()`/FinalizationRegistry
+    kernel would report clean forever here, because `_items[]` retains every
+    pooled object, so a checked-out object is never collected.
+
+### Design notes
+
+- **The observability counters MOVED off the hot path, by measurement (D6.6).**
+  The one place this session could regress 2.0.0's headline is three integer
+  increments per acquire/release for `peakUsed` / `totalAcquires` /
+  `totalReleases`. A frozen candidate copy with those counters landed in the hot
+  bodies was measured with T2's own `compareOps` machinery against the frozen
+  2.0.0 copy (min-over-9 of `max(A/B, B/A)`, OPS=50000, WARMUP=5000). Threshold:
+  keep iff min-over-9 <= 1.05 on every trial AND every T6 OP-01 lane reads 0.
+  Measured min-over-9 ratios across two runs of three trials each:
+  **1.0016, 1.0005, 1.0644** and **1.0045, 1.0065, 1.0138**; T6 lanes all 0.
+  One of six trials read **1.0644 > 1.05** -- an excursion over threshold, so by
+  the fail-closed rule ("any trial over 1.05, or ambiguity, moves them") the
+  counters **MOVED** to the `/debug` wrapper instead of shipping in
+  `acquire`/`release`. Core `stats(out)` therefore reports only the four free
+  fields. Keeping them would also have forced re-pinning all four hot-body hashes
+  and rewriting T2 from a noise-floor gate into a magic-number one; MOVE keeps
+  HOT_HASHES untouched and `speed-2.1.0.json` the record of record.
+- **The debug lane is a SUBPATH, not a `{debug: true}` flag.** A constructor flag
+  would put a branch in `acquire()`, change its `.toString()` hash, and falsify
+  T2's identical-body premise (D6.1). `{debug: true}` remains an unknown key and
+  throws by name via the generic did-you-mean path deleted-and-rebuilt in 2.1.0 --
+  no `debug`-specific special case was added (D6.2).
+- **watchPool cannot observe this pool.** lite-gc-profiler's `watchPool` detects
+  a pooled object that DIED; against this pool it is structurally incapable of
+  firing (`_items[]` retention), so `escapeCount` is 0 by construction forever.
+  Recorded in `llms.txt`, `ObjectPool.js`, and the debug subpath so it is not
+  planned against again. T8 records watchPool as ADVISORY (asserts availability
+  and the documented handle surface, deliberately NOT `escapeCount === 0` as a
+  pass).
+
+### Testing
+
+- Torture T8 (`t8-cross.mjs`) filled: three-place version sync
+  (`VERSION === package.json === llms.txt` header), both-direction docs-drift
+  against two deliberately-broken in-process fixtures, the lite-leak
+  `audit()`+`count()` kernel round trip (clean `count() === 0`, one deliberate
+  leak `count() === 1` -- the leak half IS the positive control),
+  `createCollectionGrowthKernel` against `pool.size`, and the advisory watchPool
+  shape check. T8 joined `ALL_ARMABLE_TIERS`, making the control walk TEN tiers;
+  it is non-owning, so arming it hits the entry-point backstop.
+- T6 gained a `stats(out)` lane checked `=== 0` B/op at the validated NET_OPS
+  window.
+
 ## [2.1.0] -- 2026-08-16
 
 Session P2b. The additive option reshape 2.0.0 deferred. `{size: 10, maxSize: 4}`

@@ -20,12 +20,14 @@
  *     driver whose whole job is "the gate must fail" cannot tell them apart. The
  *     defeated branch emits CONTROL-DEFEATED; this driver asserts it is ABSENT.
  *
- *   ASSERTION / DIFFERENTIAL (t1, t3, t4, t5, t9) -- own NO injectable control by
- *     design (T1/T3/T4 are assertion tiers; T5 documents "T5 owns no control; T9
- *     owns the oracle-corruption control"; T9's controls run every invocation).
- *     Arming one exercises the entry-point BACKSTOP: no tier trips, so the run
- *     fails safe with the shared backstop message. Proving the backstop bites is a
- *     real property -- arming a tier that has no control must never print "ok".
+ *   ASSERTION / DIFFERENTIAL (t1, t3, t4, t5, t8, t9) -- own NO injectable control
+ *     by design (T1/T3/T4 are assertion tiers; T5 documents "T5 owns no control;
+ *     T9 owns the oracle-corruption control"; T8 is cross-package conformance,
+ *     with a self-contained deliberate-leak as its own positive control; T9's
+ *     controls run every invocation). Arming one exercises the entry-point
+ *     BACKSTOP: no tier trips, so the run fails safe with the shared backstop
+ *     message. Proving the backstop bites is a real property -- arming a tier that
+ *     has no control must never print "ok". The walk is TEN tiers.
  *
  *     node test/controls.mjs        -> prints exactly "ok", exit 0
  *     npm run torture:controls

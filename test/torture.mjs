@@ -13,8 +13,11 @@
  *     T4  identity / lifecycle abuse    T6  the allocation gate
  *     T7  soak + leak witness           T9  controls (must be able to fail)
  *
- * T5 (differential fuzz vs oracle) is a registered empty tier filled in P2.
- * T8 (cross-package poison door) is a registered empty tier filled in P3.
+ * T5 (differential fuzz vs oracle) was filled in P2. T8 (cross-package
+ * conformance: three-place version sync, both-direction docs-drift, the
+ * lite-leak audit()+count() kernel round trip, createCollectionGrowthKernel vs
+ * pool.size, and an ADVISORY watchPool shape check) was filled in P3. The control
+ * walk (controls.mjs / ALL_ARMABLE_TIERS) is now TEN tiers.
  *
  * lite-gc-profiler is one-measurement-at-a-time, so tiers run STRICTLY
  * SEQUENTIALLY -- never nested, never concurrent.

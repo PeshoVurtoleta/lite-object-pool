@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { ObjectPool, VERSION } from '../ObjectPool.js';
 import { ObjectPool as FrozenPool } from './baseline/ObjectPool-2.0.0.js';
+import { DebugObjectPool, createPoolLeakKernel } from '../ObjectPoolDebug.js';
+import { ALL_ARMABLE_TIERS, CONTROL_OWNING_TIERS } from './torture/harness.mjs';
 
 /** Absolute path to a repo file, resolved from this test's URL (no cwd, no git). */
 const repoPath = (rel) => fileURLToPath(new URL('../' + rel, import.meta.url));
@@ -102,8 +104,8 @@ describe('ObjectPool', () => {
             assert.notStrictEqual(second, null);
         });
 
-        test('VERSION is exported and is 2.1.0', () => {
-            assert.strictEqual(VERSION, '2.1.0');
+        test('VERSION is exported and is 2.2.0', () => {
+            assert.strictEqual(VERSION, '2.2.0');
         });
     });
 
@@ -1584,6 +1586,275 @@ describe('ObjectPool', () => {
             assert.strictEqual(pool.used, 10);   // the 10 that started at life 1
             assert.strictEqual(pool.free, 10);
             pool.forEachActive((p) => assert.ok(p.life >= 0));
+        });
+    });
+
+    // ---------------------------------------------------------------
+    //  stats(out) (v2.2.0, D6) -- zero-alloc, fail-closed on a bad out
+    // ---------------------------------------------------------------
+
+    describe('stats(out)', () => {
+        test('writes size/used/free/expansions into out and returns the SAME object', () => {
+            const pool = createPool({ size: 4, expand: false });
+            pool.acquire();
+            pool.acquire();
+            const out = {};
+            const ret = pool.stats(out);
+            assert.strictEqual(ret, out); // same reference, no fresh allocation
+            assert.strictEqual(out.size, 4);
+            assert.strictEqual(out.used, 2);
+            assert.strictEqual(out.free, 2);
+            assert.strictEqual(out.expansions, 0);
+        });
+
+        test('expansions counts growth chunks (cold branch)', () => {
+            const pool = new ObjectPool({ create: () => ({}), size: 1, expand: true, maxSize: Infinity });
+            const out = {};
+            pool.stats(out);
+            assert.strictEqual(out.expansions, 0);
+            pool.acquire();          // consumes the 1 preallocated
+            pool.acquire();          // first grow -> one expansion
+            pool.stats(out);
+            assert.strictEqual(out.expansions, 1);
+        });
+
+        test('does NOT report the moved counters (peakUsed/totalAcquires/totalReleases)', () => {
+            const pool = createPool({ size: 2 });
+            pool.acquire();
+            const out = pool.stats({});
+            assert.strictEqual('peakUsed' in out, false);
+            assert.strictEqual('totalAcquires' in out, false);
+            assert.strictEqual('totalReleases' in out, false);
+        });
+
+        test('a no-arg stats() throws naming "out" (never silently allocates)', () => {
+            const pool = createPool();
+            assert.throws(() => pool.stats(),
+                (err) => err instanceof TypeError && /"out"/.test(err.message));
+        });
+
+        for (const [label, bad] of [
+            ['null', null], ['0', 0], ['NaN', NaN], ["''", ''], ['true', true], ['a string', 'x'],
+        ]) {
+            test(`stats(${label}) throws a TypeError naming "out"`, () => {
+                const pool = createPool();
+                assert.throws(() => pool.stats(bad),
+                    (err) => err instanceof TypeError && /^ObjectPool: "out"/.test(err.message));
+            });
+        }
+
+        test('accepts a function as out (a valid object receiver)', () => {
+            const pool = createPool({ size: 3 });
+            const out = () => {};
+            assert.doesNotThrow(() => pool.stats(out));
+            assert.strictEqual(out.size, 3);
+        });
+
+        test('a frozen out throws naming "out" and is left unchanged', () => {
+            const pool = createPool({ size: 4 });
+            const out = Object.freeze({ size: 0, used: 0, free: 0, expansions: 0 });
+            assert.throws(() => pool.stats(out),
+                (err) => err instanceof TypeError && /^ObjectPool: "out"/.test(err.message));
+            assert.deepStrictEqual({ size: out.size, used: out.used, free: out.free, expansions: out.expansions },
+                { size: 0, used: 0, free: 0, expansions: 0 });
+        });
+
+        test('a preventExtensions out with absent keys throws naming "out"', () => {
+            const pool = createPool();
+            assert.throws(() => pool.stats(Object.preventExtensions({})),
+                (err) => err instanceof TypeError && /^ObjectPool: "out"/.test(err.message));
+        });
+
+        test('a getter-only field throws naming "out" and does NOT half-write the buffer', () => {
+            const pool = createPool({ size: 4 });
+            pool.acquire();
+            pool.acquire();
+            const out = { size: -1, used: -1, free: -1 };
+            // A non-writable field in the LAST slot: a naive write would set the
+            // first three to fresh values, then throw -- the half-write bug.
+            Object.defineProperty(out, 'expansions', { value: 99, writable: false, enumerable: true, configurable: false });
+            assert.throws(() => pool.stats(out),
+                (err) => err instanceof TypeError && /"out"/.test(err.message));
+            // Rolled back: the writable slots hold their ORIGINAL values, not the
+            // pool's fresh ones (used would have been 2, size 4).
+            assert.strictEqual(out.size, -1);
+            assert.strictEqual(out.used, -1);
+            assert.strictEqual(out.free, -1);
+            assert.strictEqual(out.expansions, 99);
+        });
+
+        test('a sealed out that already has all four keys (writable) SUCCEEDS', () => {
+            const pool = createPool({ size: 3 });
+            const out = Object.seal({ size: 0, used: 0, free: 0, expansions: 0 });
+            assert.doesNotThrow(() => pool.stats(out)); // sealed keeps props writable
+            assert.strictEqual(out.size, 3);
+        });
+
+        test('an extensible out missing keys is restored to its EXACT prior shape (created keys deleted, not left undefined)', () => {
+            const pool = createPool({ size: 4 });
+            pool.acquire();
+            // Extensible, missing size/used/free, with a non-writable expansions:
+            // the writes to size/used/free succeed (creating keys), then expansions
+            // throws. Rollback must DELETE the three created keys, not leave them
+            // as undefined -- the exact bug the reviewer reproduced.
+            const out = {};
+            Object.defineProperty(out, 'expansions', { value: 7, writable: false, enumerable: true, configurable: false });
+            assert.throws(() => pool.stats(out),
+                (err) => err instanceof TypeError && /"out"/.test(err.message));
+            assert.deepStrictEqual(Object.keys(out), ['expansions']); // no leftover undefined keys
+            assert.strictEqual(out.expansions, 7);
+        });
+
+        test('used + free === size holds through what stats reports', () => {
+            const pool = createPool({ size: 5 });
+            pool.acquire();
+            pool.acquire();
+            const s = pool.stats({});
+            assert.strictEqual(s.used + s.free, s.size);
+        });
+    });
+
+    // ---------------------------------------------------------------
+    //  {debug: true} throws by name (v2.2.0, D6.2) -- pins existing 2.1.0
+    //  behaviour; the debug lane is a SUBPATH, not a constructor option.
+    // ---------------------------------------------------------------
+
+    describe('{debug: true} is not a constructor option', () => {
+        test('throws a TypeError naming "debug" (generic unknown-key path)', () => {
+            assert.throws(
+                () => new ObjectPool({ create: () => ({}), debug: true }),
+                (err) => err instanceof TypeError && /^ObjectPool: "debug" is not a recognized option/.test(err.message),
+            );
+        });
+    });
+
+    // ---------------------------------------------------------------
+    //  The /debug subpath (v2.2.0, D6) -- DebugObjectPool + leak kernel
+    // ---------------------------------------------------------------
+
+    describe('DebugObjectPool (the /debug subpath)', () => {
+        test('strips captureStacks so ObjectPool never sees an unknown key', () => {
+            assert.doesNotThrow(() => new DebugObjectPool({ create: () => ({}), size: 2, captureStacks: true }));
+        });
+
+        test('tags each acquire; outstanding() and leaks() track live checkouts', () => {
+            const dbg = new DebugObjectPool({ create: () => ({ x: 0 }), size: 4, expand: false });
+            assert.strictEqual(dbg.outstanding(), 0);
+            const a = dbg.acquire();
+            const b = dbg.acquire();
+            assert.strictEqual(dbg.outstanding(), 2);
+            assert.strictEqual(dbg.leaks().length, 2);
+            assert.strictEqual(dbg.leaks()[0].at, null); // captureStacks off -> no stack
+            assert.strictEqual(dbg.release(a), true);
+            assert.strictEqual(dbg.outstanding(), 1);
+            dbg.releaseAll();
+            assert.strictEqual(dbg.outstanding(), 0);
+            void b;
+        });
+
+        test('captureStacks: true records a stack string per acquire', () => {
+            const dbg = new DebugObjectPool({ create: () => ({}), size: 2, expand: false, captureStacks: true });
+            dbg.acquire();
+            assert.strictEqual(typeof dbg.leaks()[0].at, 'string');
+        });
+
+        test('delegates the pool guards (foreign release throws, double-release false)', () => {
+            const dbg = new DebugObjectPool({ create: () => ({}), size: 2, expand: false });
+            assert.throws(() => dbg.release({}), TypeError);
+            const a = dbg.acquire();
+            assert.strictEqual(dbg.release(a), true);
+            assert.strictEqual(dbg.release(a), false);
+        });
+
+        test('stats(out) reports the four core fields PLUS the moved counters', () => {
+            const dbg = new DebugObjectPool({ create: () => ({}), size: 4, expand: false });
+            const a = dbg.acquire();
+            dbg.acquire();
+            dbg.release(a);
+            const out = dbg.stats({});
+            assert.strictEqual(out.size, 4);
+            assert.strictEqual(out.used, 1);
+            assert.strictEqual(out.free, 3);
+            assert.strictEqual(out.expansions, 0);
+            assert.strictEqual(out.peakUsed, 2);
+            assert.strictEqual(out.totalAcquires, 2);
+            assert.strictEqual(out.totalReleases, 1);
+        });
+
+        test('stats(out) fails closed on a non-object out', () => {
+            const dbg = new DebugObjectPool({ create: () => ({}), size: 2 });
+            assert.throws(() => dbg.stats(), (err) => err instanceof TypeError && /"out"/.test(err.message));
+            assert.throws(() => dbg.stats(null), (err) => err instanceof TypeError && /"out"/.test(err.message));
+        });
+
+        test('stats(out) fails closed on a frozen out (all seven keys), left unchanged', () => {
+            const dbg = new DebugObjectPool({ create: () => ({}), size: 2, expand: false });
+            dbg.acquire();
+            const out = Object.freeze({});
+            assert.throws(() => dbg.stats(out), (err) => err instanceof TypeError && /"out"/.test(err.message));
+            assert.strictEqual(Object.keys(out).length, 0);
+        });
+
+        test('stats(out) rolls back rather than half-writing on a non-writable counter', () => {
+            const dbg = new DebugObjectPool({ create: () => ({}), size: 2, expand: false });
+            dbg.acquire();
+            const out = { size: -1, used: -1, free: -1, expansions: -1, peakUsed: -1, totalAcquires: -1 };
+            Object.defineProperty(out, 'totalReleases', { value: 7, writable: false, enumerable: true, configurable: false });
+            assert.throws(() => dbg.stats(out), (err) => err instanceof TypeError && /"out"/.test(err.message));
+            assert.strictEqual(out.size, -1);          // rolled back, not the fresh 2
+            assert.strictEqual(out.peakUsed, -1);      // rolled back
+            assert.strictEqual(out.totalReleases, 7);  // the non-writable slot, untouched
+        });
+
+        test('stats(out) deletes keys it created on an extensible out missing keys', () => {
+            const dbg = new DebugObjectPool({ create: () => ({}), size: 2, expand: false });
+            dbg.acquire();
+            const out = {};
+            // Only totalReleases present (non-writable); the other six are created
+            // then must be deleted on rollback, leaving out exactly {totalReleases}.
+            Object.defineProperty(out, 'totalReleases', { value: 5, writable: false, enumerable: true, configurable: false });
+            assert.throws(() => dbg.stats(out), (err) => err instanceof TypeError && /"out"/.test(err.message));
+            assert.deepStrictEqual(Object.keys(out), ['totalReleases']);
+            assert.strictEqual(out.totalReleases, 5);
+        });
+
+        test('createPoolLeakKernel: audit()+count() round trip (clean 0 -> leak 1)', () => {
+            const dbg = new DebugObjectPool({ create: () => ({ v: 0 }), size: 4, expand: false });
+            const kernel = createPoolLeakKernel(dbg);
+            assert.strictEqual(kernel.name, 'object-pool-leak');
+            assert.strictEqual(typeof kernel.install, 'undefined'); // audit()+count() ONLY
+            assert.strictEqual(typeof kernel.refine, 'undefined');
+            assert.strictEqual(kernel.count(), 0);
+            const held = [dbg.acquire(), dbg.acquire()];
+            for (const o of held) dbg.release(o);
+            assert.strictEqual(kernel.count(), 0);
+            const leaked = dbg.acquire();
+            assert.strictEqual(kernel.count(), 1);
+            const findings = kernel.audit();
+            assert.strictEqual(findings.length, 1);
+            assert.strictEqual(findings[0].kind, 'object-pool-leak');
+            assert.strictEqual(findings[0].reason, 'acquired-not-released');
+            dbg.release(leaked);
+            assert.strictEqual(kernel.count(), 0);
+        });
+
+        test('createPoolLeakKernel rejects a non-DebugObjectPool argument', () => {
+            assert.throws(() => createPoolLeakKernel({}), TypeError);
+            assert.throws(() => createPoolLeakKernel(null), TypeError);
+        });
+    });
+
+    // ---------------------------------------------------------------
+    //  Control-walk shape (P3) -- the walk is TEN tiers, t8 joined it
+    // ---------------------------------------------------------------
+
+    describe('control walk shape', () => {
+        test('ALL_ARMABLE_TIERS.length === 10', () => {
+            assert.strictEqual(ALL_ARMABLE_TIERS.length, 10);
+        });
+        test('t8 is in the walk but owns no injectable control (hits the backstop)', () => {
+            assert.ok(ALL_ARMABLE_TIERS.includes('t8'));
+            assert.strictEqual(CONTROL_OWNING_TIERS.includes('t8'), false);
         });
     });
 });

@@ -462,6 +462,20 @@ P2b -- 2.1.0 -- the option shape                  [D5]
 P3  -- 2.2.0 -- ecosystem lanes (renumbered)
 ```
 
+**Amendment (2026-08-17, after P2b/2.1.0 shipped, at the start of P3/BRIEF2).**
+The block above renumbered P3 to 2.2.0 but stopped there, leaving P4 and P5 still
+claiming 2.2.0 -- which is now P3's. Corrected train, verified against the
+frontmatter above:
+
+```
+P3  -- 2.2.0 -- ecosystem lanes (stats + /debug subpath)  [BRIEF2, D6]  SHIPPING
+P4  -- 2.3.0 -- bench and demo                             [BRIEF3]
+P5  -- 2.3.0 -- release train (same release as P4)         [BRIEF4]
+```
+
+P4 and P5 sharing one version (2.3.0) is intentional and preserved: P4 builds the
+bench and demo, P5 publishes them as one release; neither adds API.
+
 The split line is **breaking vs additive**, and it falls out of the release
 semantics rather than taste:
 
@@ -968,13 +982,13 @@ DONE WHEN
 ```
 
 ===============================================================================
-# P3 -- v2.1.0 -- ecosystem lanes
+# P3 -- v2.2.0 -- ecosystem lanes
 ===============================================================================
 
 ```markdown
 ---
 package: "@zakkster/lite-object-pool"
-version_target: 2.1.0
+version_target: 2.2.0
 status: planned
 gc_maxMajor: 0
 gc_maxPauseMs: 4
@@ -1071,13 +1085,13 @@ DONE WHEN
 ```
 
 ===============================================================================
-# P4 -- v2.2.0 -- bench and demo
+# P4 -- v2.3.0 -- bench and demo
 ===============================================================================
 
 ```markdown
 ---
 package: "@zakkster/lite-object-pool"
-version_target: 2.2.0
+version_target: 2.3.0
 status: planned
 gc_maxMajor: 0
 gc_maxPauseMs: 4
@@ -1141,13 +1155,13 @@ DONE WHEN
 ```
 
 ===============================================================================
-# P5 -- v2.2.0 release train
+# P5 -- v2.3.0 release train
 ===============================================================================
 
 ```markdown
 ---
 package: "@zakkster/lite-object-pool"
-version_target: 2.2.0
+version_target: 2.3.0
 status: planned
 gc_maxMajor: 0
 gc_maxPauseMs: 4
@@ -1199,7 +1213,7 @@ TASKS
     "Karadjov". Grep for it.
 
 ASSERTIONS
-  - `/release 2.2.0` clean, twice in a row.
+  - `/release 2.3.0` clean, twice in a row.
   - `npm pack --dry-run` includes README, CHANGELOG, LICENSE, llms.txt,
     ObjectPool.js, ObjectPool.d.ts -- and excludes test/, demo/, decisions/.
   - Three-place version sync asserted by the T8 test, not by eye.
@@ -1310,6 +1324,16 @@ feature". It is: **would this test fail if the pool started allocating?**
   **Trigger:** a consumer needs serializable or cross-worker pool refs, OR P2's
   Decision 1 rejects the symbol-stamped slot index, which makes this the
   structure rather than an addition.
+  **STATUS (2026-08-17, recorded at BRIEF2/P3): the second clause FIRED, and is
+  DISCHARGED -- not outstanding.** P2a's Decision 1 DID reject the symbol stamp:
+  it went WeakMap-only, because the mixed symbol+WeakMap lane did not net zero
+  (0.0055 B/op -- the only lane that does NOT net zero, `decisions/D1-structure.md:119`).
+  The second clause exists because rejecting the symbol stamp was ASSUMED to
+  leave nothing mapping object -> slot, making handles the only remaining
+  structure. WeakMap-only supplies that mapping at 0 B/op with zero capability
+  regression, so the need the trigger anticipated never materialised. Only the
+  FIRST clause -- serializable / cross-worker refs -- can still fire. Written down
+  so a future reader does not conclude the roadmap was violated.
 - **D2 -- SAB shared pool via a lite-worker subpath.**
   **Trigger:** lite-ambient-fx or lite-worker demands cross-thread pooling.
 - **D3 -- `shrink()` / TTL decay.**

@@ -21,6 +21,16 @@
  * the two vocabularies are mutually exclusive and mixing them throws. All of it
  * is constructor-cold -- the hot bodies are byte-identical to 2.0.0.
  *
+ * v2.2.0 adds zero-allocation observability: stats(out) fills a caller-provided
+ * object with {size, used, free, expansions} and allocates nothing (D6). The hot
+ * bodies stay byte-identical -- `expansions` is counted only on the cold _grow
+ * branch, and the acquire-site tagging / leak counters that WOULD cost the hot
+ * path live in the separate `@zakkster/lite-object-pool/debug` subpath, off the
+ * production path entirely (D6, measured: the counters moved rather than ship in
+ * acquire/release). NOTE: lite-gc-profiler's watchPool cannot observe an
+ * acquired-never-released object from this pool, because _items[] retains every
+ * pooled object for the pool's whole lifetime -- see the /debug subpath and D6.9.
+ *
  * Features:
  * - Preallocates objects for GC-free reuse -- zero allocation on the hot path
  * - Optional auto-expansion in bounded chunks with a capacity ceiling
@@ -29,7 +39,7 @@
  * - O(1) acquire, release, and double-release protection (no hash on the hot path)
  * - forEachActive() reverse iteration -- releasing the current object is safe
  * - User-defined create() and reset() callbacks
- * - Stats: size, used, free
+ * - Stats: size, used, free, expansions -- via getters and zero-alloc stats(out)
  * - Zero dependencies, single file
  */
 
@@ -50,7 +60,7 @@ const EMPTY_U32 = new Uint32Array(0);
 const GROW_CHUNK = 256;
 
 /** Package version. Kept in sync with package.json and llms.txt. */
-export const VERSION = '2.1.0';
+export const VERSION = '2.2.0';
 
 /** The only option keys this version recognizes. Anything else is rejected at
  *  construction (fail closed on an unverified state). The 2.1.0 canonical triple
@@ -118,6 +128,26 @@ function suggestKey(key) {
  */
 function received(v) {
     return (typeof v === 'symbol' ? v.toString() : String(v)) + ' (' + typeof v + ')';
+}
+
+/**
+ * Restore ONE stats slot during a failed stats() write, so `out` is left in its
+ * EXACT prior shape -- not merely free of stale values. A slot that existed as an
+ * own property before the write is put back to its saved value; a slot this write
+ * CREATED (absent before) is DELETED, never left as a fresh `undefined` key (a
+ * plain assignment makes a configurable property, so the delete cannot fail).
+ * Guarded per slot so one non-writable field cannot skip another's cleanup. Cold:
+ * the stats() throw path only; never runs when `out` is writable.
+ * @param {Object} out
+ * @param {string} key
+ * @param {boolean} had  Was `key` an own property of `out` before the write?
+ * @param {*} val         Its saved prior value (used only when `had`).
+ */
+function undoStatSlot(out, key, had, val) {
+    try {
+        if (had) out[key] = val;
+        else delete out[key];
+    } catch { /* a non-writable pre-existing slot was never changed; nothing to undo */ }
 }
 
 export class ObjectPool {
@@ -261,6 +291,7 @@ export class ObjectPool {
         this._capacity = 0; // length of the typed-array backing store
         this._size = 0;     // number of objects actually created
         this._active = 0;   // cursor: how many are checked out
+        this._expansions = 0; // times _grow built a chunk (cold; reported by stats)
 
         // Preallocation of `preallocSpec` objects. Validation guarantees it is a
         // clean integer and `capacity >= preallocSpec`. `prealloc:"eager"` has
@@ -361,6 +392,7 @@ export class ObjectPool {
         this._reserve(this._size + n);
         const create = this._create;
         for (let k = 0; k < n; k++) this._append(create());
+        this._expansions++;                              // cold: never on the hot body
 
         const a = this._active;
         this._active = a + 1;
@@ -470,6 +502,63 @@ export class ObjectPool {
     /** Total pool size (all created objects). */
     get size() {
         return this._size;
+    }
+
+    /**
+     * Write the pool's stats into a caller-provided object and return it,
+     * allocating nothing (D6). Telemetry-rate (~10 Hz), not a hot path.
+     *
+     * Fields: `size` / `used` / `free` (the getters) and `expansions` (how many
+     * times _grow built a chunk -- counted on the cold growth branch, so
+     * reporting it costs the acquire hot body nothing). The observability
+     * counters `peakUsed` / `totalAcquires` / `totalReleases` are NOT here: a
+     * measurement moved them off the hot path into the `/debug` subpath (D6.6),
+     * so this method reports only what is free.
+     *
+     * Fails closed: `out` MUST be an object (or function) to receive the fields.
+     * A non-object -- including `undefined` (so a no-arg `stats()` throws rather
+     * than silently allocating a fresh object in a package whose identity is the
+     * absence of one), `null`, or a primitive -- throws a `TypeError` naming
+     * `"out"`. There is no shared module-level buffer to alias, by design.
+     *
+     * @param {Object} out Caller object mutated in place and returned.
+     * @returns {Object} the same `out`.
+     */
+    stats(out) {
+        if (out === null || (typeof out !== 'object' && typeof out !== 'function')) {
+            throw new TypeError('ObjectPool: "out" must be an object to receive stats, received ' + received(out));
+        }
+        // Fail closed WITHOUT half-writing, and WITHOUT leaving behind keys we
+        // created. A frozen / sealed-empty / getter-only `out` cannot take every
+        // field; a naive four-line write would set the writable ones and then
+        // throw a native error on the first non-writable one, leaving the caller a
+        // buffer that is three-quarters fresh and one-quarter stale -- silently
+        // wrong telemetry. So this is TRANSACTIONAL: snapshot each field's prior
+        // OWN value and whether it existed, write all four, and on ANY
+        // non-writable slot roll `out` back to EXACTLY its prior shape (present
+        // keys to their value, keys we created deleted), then throw a TypeError
+        // naming "out". Rollback, not descriptor pre-validation, because
+        // Object.getOwnPropertyDescriptor allocates a descriptor object per key --
+        // that would break the T6 `stats(out) === 0` gate. Object.hasOwn and
+        // primitive reads/writes do not allocate, so the writable common path
+        // stays zero-alloc.
+        const hadSize = Object.hasOwn(out, 'size'), s0 = out.size;
+        const hadUsed = Object.hasOwn(out, 'used'), u0 = out.used;
+        const hadFree = Object.hasOwn(out, 'free'), f0 = out.free;
+        const hadExp = Object.hasOwn(out, 'expansions'), e0 = out.expansions;
+        try {
+            out.size = this._size;
+            out.used = this._active;
+            out.free = this._size - this._active;
+            out.expansions = this._expansions;
+        } catch {
+            undoStatSlot(out, 'size', hadSize, s0);
+            undoStatSlot(out, 'used', hadUsed, u0);
+            undoStatSlot(out, 'free', hadFree, f0);
+            undoStatSlot(out, 'expansions', hadExp, e0);
+            throw new TypeError('ObjectPool: "out" is not writable for the stats fields (a frozen, sealed, or getter-only target)');
+        }
+        return out;
     }
 
     /**

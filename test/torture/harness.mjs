@@ -55,20 +55,25 @@ export const BREAK = BREAK_RAW !== '' && BREAK_RAW !== '0';
  * these alone MUST trip THAT tier for THAT tier's reason -- it prints that tier's
  * `TN:` tag and exits non-zero. `controls.mjs` walks these with the strict check.
  *
- * Every OTHER armable tier (T1/T3/T4/T5/T9) owns NO injectable control by design:
- * T1/T3/T4 are pure assertion tiers, T5 is a differential-fuzz tier that
- * documents "T5 owns no control; T9 owns the oracle-corruption control", and T9's
- * controls run on EVERY invocation rather than being armed. Arming one of those
- * exercises the entry-point BACKSTOP instead (no tier trips -> "every control
- * still passed" -> non-zero exit), which `controls.mjs` walks with the backstop
- * check. Proving the backstop bites is itself a real property: arming a tier that
- * has no control must fail SAFE, never silently print "ok".
+ * Every OTHER armable tier (T1/T3/T4/T5/T8/T9) owns NO injectable control by
+ * design: T1/T3/T4 are pure assertion tiers, T5 is a differential-fuzz tier that
+ * documents "T5 owns no control; T9 owns the oracle-corruption control", T8 is a
+ * cross-package conformance tier (version sync, docs-drift, the lite-leak
+ * audit-kernel round trip -- its own deliberate-leak IS its positive control,
+ * self-contained and always cleaned up), and T9's controls run on EVERY
+ * invocation rather than being armed. Arming one of those exercises the
+ * entry-point BACKSTOP instead (no tier trips -> "every control still passed" ->
+ * non-zero exit), which `controls.mjs` walks with the backstop check. Proving the
+ * backstop bites is itself a real property: arming a tier that has no control must
+ * fail SAFE, never silently print "ok".
  */
 export const CONTROL_OWNING_TIERS = ['t0', 't2', 't6', 't7'];
 
 /** Every tier id that can be named in OBJECTPOOL_TORTURE_BREAK. controls.mjs
- *  walks all of them; CONTROL_OWNING_TIERS decides which check each one gets. */
-export const ALL_ARMABLE_TIERS = ['t0', 't1', 't2', 't3', 't4', 't5', 't6', 't7', 't9'];
+ *  walks all TEN of them; CONTROL_OWNING_TIERS decides which check each one gets.
+ *  t8 (filled in P3) joined the walk here -- it is non-owning, so arming it hits
+ *  the backstop. */
+export const ALL_ARMABLE_TIERS = ['t0', 't1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9'];
 
 /** The tiers whose controls this run has armed. `1`/`all` arms the owning set. */
 export const BREAK_TIERS = BREAK_RAW === '1' || BREAK_RAW === 'all'
