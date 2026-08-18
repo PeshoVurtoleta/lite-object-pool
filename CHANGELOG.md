@@ -9,6 +9,58 @@ Version is synced in three places from 1.0.3 forward: `package.json`, the
 `VERSION` const exported from `ObjectPool.js`, and the header line of
 `llms.txt`.
 
+## [2.3.1] -- 2026-08-18
+
+Session P5 (BRIEF4), the docs half of the 2.3.0 plan, shipped as its own patch
+because 2.3.0 published early with only P4. DOCS-ONLY: no source file changed
+except the lockstep `VERSION` const -- the four pinned hot-body hashes (`acquire`
+55f3a646dd5e9a57, `release` 239ef75c603bf839, `releaseAll` b29b13b9996ffd34,
+`forEachActive` 937941616f65fd72) did not move, and `ObjectPoolDebug.js` is
+byte-identical to 2.3.0. This resolves the SCOPE NOTE in the 2.3.0 entry below.
+
+### Changed
+
+- **README rebuilt on the LiteSepforge blueprint** (per `../CLAUDE.md`). The old
+  spine (Features / Installation / Quick Start / How It Works / Use Cases) is
+  replaced with the blueprint spine in order: positioning H2 with inline install
+  and a runnable quick-start; TOC; Why this exists; What you get; a `<details>`
+  core deep-dive; API reference with a constants table; Composability with an
+  end-to-end debug-lane pipeline; a `<details>` Zero-GC design notes with an
+  allocation table and the stamped bench numbers; Design decisions worth knowing;
+  Migrating; Testing (297 tests / 57 suites); What this is not; Ecosystem;
+  License. The nine existing badges are kept. ASCII-only; every relative link
+  resolves to a repo file.
+- **The v1 -> v2 migration section now lists all TEN breaking changes**, not four,
+  each with its issue id, reason, and a one-line fix. Sourced across two CHANGELOG
+  entries, not one: items 9 (`{maxSize < size}` throws, OP-02) and 10 (strict
+  boolean `expand`) are `1.1.0` changes; items 1-8 are `2.0.0`. Items 1, 8, and 9
+  are flagged as the three that change behaviour for code that never threw. The
+  2.1.0 additive option shape (`capacity` / `prealloc` / `onExhausted`) is a
+  clearly separated second section so the additive half does not read as
+  mandatory.
+- **The version-assertion test** (`test/ObjectPool.test.js`) and the `demo/`
+  header track the new version.
+
+### Not changed (named)
+
+- **`bench/bench-results.json` stays stamped at `objectPoolVersion` `2.3.0`.** It
+  is the record of the run that produced the README's benchmark numbers; 2.3.1's
+  hot paths are byte-identical, so re-stamping without re-running would
+  misrepresent the artifact and re-running would drift the README table off a
+  noise delta. The `package.json` / `VERSION` / `llms.txt` triple is at 2.3.1.
+- **`homepage` / `repository` / `bugs` / `funding` URLs and the sponsor badge**
+  (`PeshoVurtoleta`) are unchanged -- the author's real GitHub handle, matching
+  ~17 sibling packages (closed task OP-13). `zakkster` is the npm handle. Both
+  are correct; do not "fix" them.
+
+### Added
+
+- Nothing. No new surface, no new export.
+
+### Removed
+
+- Nothing.
+
 ## [2.3.0] -- 2026-08-18
 
 Session P4. Every number this package advertises becomes STAMPED and re-runnable,

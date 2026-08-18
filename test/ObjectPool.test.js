@@ -104,8 +104,8 @@ describe('ObjectPool', () => {
             assert.notStrictEqual(second, null);
         });
 
-        test('VERSION is exported and is 2.3.0', () => {
-            assert.strictEqual(VERSION, '2.3.0');
+        test('VERSION is exported and is 2.3.1', () => {
+            assert.strictEqual(VERSION, '2.3.1');
         });
     });
 
